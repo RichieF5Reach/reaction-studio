@@ -674,7 +674,7 @@ class ReactionStudio(tk.Tk):
             ("🔍", "Find trending video",              "find"),
             ("🤖", "Generate reaction script",         "script"),
             ("🎙️", "Synthesize voice (Piper)",          "tts"),
-            ("💬", "Auto-caption (Whisper / Script)",  "captions"),
+            ("📥", "Download source video",            "captions"),  # step key "captions" kept for compat
             ("🎨", "Apply video filter",               "filter"),
             ("💥", "Add crashout animations",          "fx"),
             ("🎞️", "Export final MP4 + .srt",          "export"),
@@ -710,11 +710,25 @@ class ReactionStudio(tk.Tk):
         return frame
 
     def _start_generate(self):
-        # Update summary label with current settings
-        vf    = self.video_filter_var.get()
-        cm    = self.caption_mode_var.get()
-        cs    = self.caption_style_var.get()
-        niche = self.niche_var.get()
+        # Snapshot ALL GUI vars here (main thread) before spawning worker.
+        # This is the ONLY safe place to read tkinter widgets.
+        niche  = self.niche_var.get()
+        voice  = self.voice_path.get()
+        energy = self.energy_var.get() if hasattr(self, 'energy_var') else 'High'
+        style  = (self.style_entry.get('1.0', 'end').strip()
+                  if hasattr(self, 'style_entry') else '')
+        crash  = (self.crashout_var.get()
+                  if hasattr(self, 'crashout_var') else True)
+        vf     = self.video_filter_var.get()
+        cs     = self.caption_style_var.get()
+        cm     = self.caption_mode_var.get()
+
+        self._gen_settings = {
+            'niche': niche, 'voice': voice, 'energy': energy,
+            'style': style, 'crashout': crash,
+            'vf': vf, 'cs': cs, 'cm': cm,
+        }
+
         summary = (f"Niche: {niche}  |  Filter: {vf}  |  "
                    f"Captions: {cm}  |  Style: {cs}")
         self.gen_summary.config(text=summary)
@@ -748,7 +762,7 @@ class ReactionStudio(tk.Tk):
             "find":     "Finding trending video",
             "script":   "Writing reaction script",
             "tts":      "Synthesizing voice",
-            "captions": "Generating captions",
+            "captions": "Downloading source video",
             "filter":   "Applying video filter",
             "fx":       "Adding crashout FX",
             "export":   "Exporting MP4 + SRT",
@@ -782,16 +796,17 @@ class ReactionStudio(tk.Tk):
                 self.gen_status.config(text=f"Error: {m[:80]}", fg=RED),
             ))
 
-        # Collect settings from GUI vars (read before thread starts is fine;
-        # StringVar.get() is thread-safe for reads)
-        niche     = self.niche_var.get()
-        voice     = self.voice_path.get()
-        energy    = self.energy_var.get()
-        style     = self.style_entry.get("1.0", "end").strip()
-        crashout  = self.crashout_var.get()
-        vf        = self.video_filter_var.get()
-        cs        = self.caption_style_var.get()
-        cm        = self.caption_mode_var.get()
+        # Read pre-snapshotted settings (set on main thread in _start_generate).
+        # Never read tkinter widgets directly from a background thread.
+        _s       = getattr(self, '_gen_settings', {})
+        niche    = _s.get('niche',   self.niche_var.get())
+        voice    = _s.get('voice',   '')
+        energy   = _s.get('energy',  'High')
+        style    = _s.get('style',   '')
+        crashout = _s.get('crashout', True)
+        vf       = _s.get('vf',      'None')
+        cs       = _s.get('cs',      'Bold Yellow')
+        cm       = _s.get('cm',      'Auto')
 
         tmp_dir = tempfile.mkdtemp(prefix="reaction_studio_")
         output_path = _os.path.join(_os.path.expanduser("~"), "Desktop",
@@ -923,10 +938,6 @@ class ReactionStudio(tk.Tk):
             threading.Thread(target=self._upload_worker, daemon=True).start()
         else:
             self.after(1600, lambda: self.show_page("upload"))
-
-    # ════════════════════════════════════════
-    #  PAGE: UPLOAD
-    # ════════════════════════════════════════
 
     # ════════════════════════════════════════
     #  PAGE: UPLOAD
@@ -1280,8 +1291,6 @@ class ReactionStudio(tk.Tk):
             filetypes=[("Video", "*.mp4 *.mov *.mkv"), ("All", "*.*")])
         if path:
             self.last_output_path = path
-            self._log(f"Upload target set: {path}")
-
             self._log(f"Upload target set: {path}")
 
     # ════════════════════════════════════════

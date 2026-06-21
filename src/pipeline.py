@@ -236,11 +236,18 @@ def download_video(url: str, output_dir: str) -> str:
         try:
             result = subprocess.run(cmd, timeout=600, capture_output=True, text=True)
             if result.returncode == 0:
-                for f in os.listdir(output_dir):
-                    if f.startswith("source.") and not f.endswith(".part"):
-                        full = os.path.join(output_dir, f)
-                        if os.path.getsize(full) > 10_000:   # at least 10KB
-                            return full
+                # Prefer mp4 > mkv > webm > any other — deterministic
+                candidates = [
+                    os.path.join(output_dir, f)
+                    for f in os.listdir(output_dir)
+                    if f.startswith("source.") and not f.endswith(".part")
+                    and os.path.getsize(os.path.join(output_dir, f)) > 10_000
+                ]
+                _pref = {".mp4": 0, ".mkv": 1, ".webm": 2}
+                candidates.sort(
+                    key=lambda p: _pref.get(os.path.splitext(p)[1], 99))
+                if candidates:
+                    return candidates[0]
             else:
                 print(f"[download_video] fmt='{fmt}' failed: {result.stderr[:200]}")
         except Exception as e:
@@ -385,7 +392,9 @@ def compose_video(source_video: str, voice_audio: str,
             final = final.with_audio(original_audio)
 
         # ── Write output ──────────────────────────────────────────────────
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        _out_dir = os.path.dirname(os.path.abspath(output_path))
+        if _out_dir:
+            os.makedirs(_out_dir, exist_ok=True)
         final.write_videofile(
             output_path,
             fps=30,
@@ -395,10 +404,20 @@ def compose_video(source_video: str, voice_audio: str,
             threads=4,
             logger=None,
         )
-        final.close()
-        source.close()
+        # Close in dependency order: final (composite) first, then its sources
+        try:
+            final.close()
+        except Exception:
+            pass
+        try:
+            source.close()
+        except Exception:
+            pass
         if voice:
-            voice.close()
+            try:
+                voice.close()
+            except Exception:
+                pass
 
         return os.path.exists(output_path) and os.path.getsize(output_path) > 10_000
 
