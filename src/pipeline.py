@@ -411,58 +411,177 @@ def compose_video(source_video: str, voice_audio: str,
         return False
 
 
+
+# ─────────────────────────────────────────────
+#  YOUTUBE SCOPES
+# ─────────────────────────────────────────────
+YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+
+
+# ─────────────────────────────────────────────
+#  OAUTH — check if already authenticated
+# ─────────────────────────────────────────────
+def is_authenticated() -> bool:
+    """Return True if a valid (or refreshable) token exists."""
+    if not TOKEN_PATH.exists():
+        return False
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), YT_SCOPES)
+        if creds and creds.valid:
+            return True
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            TOKEN_PATH.write_text(creds.to_json())
+            return True
+    except Exception as e:
+        print(f"[is_authenticated] {e}")
+    return False
+
+
+# ─────────────────────────────────────────────
+#  OAUTH — full flow
+# ─────────────────────────────────────────────
+def run_oauth_flow(client_secrets_path: str) -> bool:
+    """
+    Run Google OAuth flow using the provided client_secrets.json.
+    Uses run_local_server with explicit port 8080 and a 120s timeout
+    so it doesn't hang silently on redirect failure.
+    """
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        flow = InstalledAppFlow.from_client_secrets_file(
+            client_secrets_path, YT_SCOPES)
+        # Try port 8080 first (more reliable on Windows), fall back to random port
+        for port in [8080, 8090, 8888, 0]:
+            try:
+                creds = flow.run_local_server(
+                    port=port,
+                    open_browser=True,
+                    timeout_seconds=120,
+                    success_message=(
+                        "Reaction Studio is now connected to YouTube! "
+                        "You can close this tab."
+                    ),
+                )
+                TOKEN_PATH.write_text(creds.to_json())
+                print(f"[run_oauth_flow] Token saved to {TOKEN_PATH}")
+                return True
+            except OSError:
+                # Port in use — try next
+                continue
+            except Exception as e:
+                print(f"[run_oauth_flow] port {port} error: {e}")
+                break
+    except Exception as e:
+        print(f"[run_oauth_flow] {e}")
+    return False
+
+
+# ─────────────────────────────────────────────
+#  OAUTH — headless / manual fallback
+# ─────────────────────────────────────────────
+def run_oauth_flow_manual(client_secrets_path: str) -> str:
+    """
+    Returns an authorization URL for the user to open manually.
+    The user pastes the code back; call exchange_oauth_code() with it.
+    """
+    try:
+        from google_auth_oauthlib.flow import Flow
+        flow = Flow.from_client_secrets_file(
+            client_secrets_path, YT_SCOPES,
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob")
+        auth_url, _ = flow.authorization_url(prompt="consent")
+        # stash flow for exchange
+        _PENDING_FLOWS[client_secrets_path] = flow
+        return auth_url
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+_PENDING_FLOWS: dict = {}
+
+
+def exchange_oauth_code(client_secrets_path: str, code: str) -> bool:
+    """Complete the manual OAuth flow by exchanging the code."""
+    flow = _PENDING_FLOWS.get(client_secrets_path)
+    if not flow:
+        return False
+    try:
+        flow.fetch_token(code=code)
+        TOKEN_PATH.write_text(flow.credentials.to_json())
+        _PENDING_FLOWS.pop(client_secrets_path, None)
+        return True
+    except Exception as e:
+        print(f"[exchange_oauth_code] {e}")
+        return False
+
+
 # ─────────────────────────────────────────────
 #  STEP 6: Upload to YouTube
 # ─────────────────────────────────────────────
 def upload_to_youtube(video_path: str, title: str,
                       description: str = "", privacy: str = "public") -> str:
+    """
+    Upload video to YouTube. Auto-refreshes expired tokens.
+    Returns the video URL on success, or "ERROR: ..." on failure.
+    """
     try:
         from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
 
         if not TOKEN_PATH.exists():
-            return "ERROR: Not authenticated. Run OAuth flow first."
+            return "ERROR: Not authenticated. Connect your Google account first."
 
-        creds   = Credentials.from_authorized_user_file(
-            str(TOKEN_PATH),
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],
-        )
+        # Load and auto-refresh credentials
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), YT_SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    TOKEN_PATH.write_text(creds.to_json())
+                    print("[upload_to_youtube] Token refreshed.")
+                except Exception as refresh_err:
+                    return f"ERROR: Token expired and refresh failed: {refresh_err}. Please re-connect your Google account."
+            else:
+                return "ERROR: Token invalid. Please re-connect your Google account."
+
         youtube = build("youtube", "v3", credentials=creds)
-        body    = {
+
+        body = {
             "snippet": {
                 "title":       title[:100],
                 "description": description,
-                "tags":        ["reaction", "viral", "commentary"],
+                "tags":        ["reaction", "viral", "commentary", "reactionvideo"],
                 "categoryId":  "22",
             },
             "status": {"privacyStatus": privacy},
         }
-        media    = MediaFileUpload(video_path, mimetype="video/mp4",
-                                   resumable=True, chunksize=1024 * 1024)
-        request  = youtube.videos().insert(part="snippet,status",
-                                           body=body, media_body=media)
+
+        media = MediaFileUpload(
+            video_path,
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=5 * 1024 * 1024,   # 5MB chunks — more reliable than 1MB
+        )
+        request  = youtube.videos().insert(
+            part="snippet,status", body=body, media_body=media)
+
         response = None
         while response is None:
-            _, response = request.next_chunk()
-        return f"https://youtu.be/{response.get('id','')}"
+            status, response = request.next_chunk()
+            if status:
+                pct = int(status.progress() * 100)
+                print(f"[upload_to_youtube] {pct}%")
+
+        video_id = response.get("id", "")
+        if not video_id:
+            return f"ERROR: Upload succeeded but got no video ID. Response: {response}"
+        return f"https://youtu.be/{video_id}"
+
     except Exception as e:
         return f"ERROR: {e}"
-
-
-# ─────────────────────────────────────────────
-#  OAUTH
-# ─────────────────────────────────────────────
-def run_oauth_flow(client_secrets_path: str) -> bool:
-    try:
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        flow  = InstalledAppFlow.from_client_secrets_file(
-            client_secrets_path,
-            scopes=["https://www.googleapis.com/auth/youtube.upload"],
-        )
-        creds = flow.run_local_server(port=0)
-        TOKEN_PATH.write_text(creds.to_json())
-        return True
-    except Exception as e:
-        print(f"[run_oauth_flow] {e}")
-        return False

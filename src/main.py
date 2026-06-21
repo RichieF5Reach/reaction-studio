@@ -927,13 +927,17 @@ class ReactionStudio(tk.Tk):
     # ════════════════════════════════════════
     #  PAGE: UPLOAD
     # ════════════════════════════════════════
+
+    # ════════════════════════════════════════
+    #  PAGE: UPLOAD
+    # ════════════════════════════════════════
     def _page_upload(self):
         frame = tk.Frame(self.container, bg=BG)
 
         tk.Label(frame, text="YouTube Upload", bg=BG, fg=TEXT,
                  font=FONT_BIG).pack(anchor="w", padx=32, pady=(28, 4))
         tk.Label(frame,
-                 text="Authenticate once with Google. Uploads go live automatically.",
+                 text="Connect once — uploads go live automatically.",
                  bg=BG, fg=TEXT_DIM, font=FONT_SMALL).pack(anchor="w", padx=32, pady=(0, 16))
 
         auth_frame = tk.Frame(frame, bg=BG2)
@@ -942,14 +946,28 @@ class ReactionStudio(tk.Tk):
         self.auth_dot = tk.Label(auth_frame, text="○", bg=BG2, fg=TEXT_DIM,
                                  font=("Segoe UI", 18))
         self.auth_dot.pack(side="left", padx=16, pady=12)
-        tk.Label(auth_frame, text="Google / YouTube Account",
-                 bg=BG2, fg=TEXT, font=FONT_MED).pack(side="left")
-        ttk.Button(auth_frame, text="Connect Google Account",
+        self.auth_status_lbl = tk.Label(auth_frame, text="Not connected",
+                                        bg=BG2, fg=TEXT_DIM, font=FONT_MED)
+        self.auth_status_lbl.pack(side="left")
+        ttk.Button(auth_frame, text="Connect YouTube",
                    command=self._connect_google
                    ).pack(side="right", padx=12, pady=8, ipadx=8, ipady=4)
 
+        help_frame = tk.Frame(frame, bg=BG3)
+        help_frame.pack(fill="x", padx=32, pady=(0, 8))
+        tk.Label(help_frame,
+                 text=(
+                     "i  Requires a free Google API key.\n"
+                     "   1. console.cloud.google.com\n"
+                     "   2. New project -> Enable 'YouTube Data API v3'\n"
+                     "   3. Credentials -> OAuth 2.0 Client ID (Desktop app) -> Download JSON\n"
+                     "   4. Save as:  C:\\Users\\YOU\\.reaction_studio\\client_secrets.json"
+                 ),
+                 bg=BG3, fg=TEXT_DIM, font=("Consolas", 9),
+                 justify="left").pack(anchor="w", padx=16, pady=10)
+
         tk.Label(frame, text="Title Template:", bg=BG, fg=TEXT,
-                 font=FONT_MED).pack(anchor="w", padx=32, pady=(20, 4))
+                 font=FONT_MED).pack(anchor="w", padx=32, pady=(12, 4))
         self.title_entry = tk.Entry(frame, bg=BG2, fg=TEXT,
                                     insertbackground=TEXT,
                                     font=FONT_MED, width=52, bd=0)
@@ -978,37 +996,61 @@ class ReactionStudio(tk.Tk):
 
         btn_row = tk.Frame(frame, bg=BG)
         btn_row.pack(anchor="w", padx=32, pady=12)
-        ttk.Button(btn_row, text="  🚀  Upload Now",
+        ttk.Button(btn_row, text="  Upload Now",
                    command=self._upload_now
                    ).pack(side="left", ipadx=14, ipady=8)
-        ttk.Button(btn_row, text="  📁  Select Different File",
+        ttk.Button(btn_row, text="  Select Different File",
                    command=self._pick_upload_file
                    ).pack(side="left", padx=12, ipadx=10, ipady=8)
 
         self.upload_status = tk.Label(frame, text="", bg=BG, fg=GREEN, font=FONT_MED)
         self.upload_status.pack(anchor="w", padx=32, pady=8)
 
+        # Restore auth state from saved token on launch
+        self.after(500, self._restore_auth_state)
+
         return frame
 
+    def _restore_auth_state(self):
+        """Check on startup if a valid token already exists — restore green dot."""
+        def _check():
+            try:
+                import pipeline as P
+                if P.is_authenticated():
+                    self._ui(lambda: (
+                        self.auth_dot.config(text="●", fg=GREEN),
+                        self.auth_status_lbl.config(text="Connected", fg=GREEN),
+                        self.yt_auth_done.set(True),
+                    ))
+                    self._log("YouTube: existing token valid.")
+            except Exception as e:
+                self._log(f"[auth restore] {e}")
+        import threading as _th
+        _th.Thread(target=_check, daemon=True).start()
+
     def _connect_google(self):
-        """Run real Google OAuth flow via pipeline.run_oauth_flow."""
+        """Run Google OAuth. Falls back to manual code flow if browser redirect fails."""
         import threading as _th
 
-        secrets_path = __import__('os').path.join(
-            __import__('os').path.expanduser("~"),
-            ".reaction_studio", "client_secrets.json")
+        secrets_path = os.path.join(
+            os.path.expanduser("~"), ".reaction_studio", "client_secrets.json")
 
-        if not __import__('os').path.exists(secrets_path):
-            __import__('tkinter.messagebox', fromlist=['showinfo']).showinfo(
+        if not os.path.exists(secrets_path):
+            messagebox.showinfo(
                 "Setup Required",
-                "To connect YouTube, place your Google OAuth client_secrets.json at:\n\n"
-                f"  {secrets_path}\n\n"
-                "Get it free from: console.cloud.google.com\n"
-                "Create a project → Enable YouTube Data API v3 → "
-                "OAuth 2.0 Client ID (Desktop app) → Download JSON")
+                "To connect YouTube:\n\n"
+                "1. Go to console.cloud.google.com\n"
+                "2. New project -> Enable 'YouTube Data API v3'\n"
+                "3. Credentials -> OAuth 2.0 Client ID (Desktop) -> Download JSON\n"
+                "4. Rename to client_secrets.json and save here:\n\n"
+                f"   {secrets_path}\n\n"
+                "Then click Connect YouTube again.")
             return
 
-        self._ui(lambda: self.auth_dot.config(text="◌", fg=YELLOW))
+        self._ui(lambda: (
+            self.auth_dot.config(text="o", fg=YELLOW),
+            self.auth_status_lbl.config(text="Connecting...", fg=YELLOW),
+        ))
         self._log("Starting Google OAuth flow...")
 
         def _oauth_thread():
@@ -1018,36 +1060,114 @@ class ReactionStudio(tk.Tk):
                 if ok:
                     self._ui(lambda: (
                         self.auth_dot.config(text="●", fg=GREEN),
+                        self.auth_status_lbl.config(text="Connected", fg=GREEN),
                         self.yt_auth_done.set(True),
                     ))
-                    self._log("Google OAuth complete — token saved.")
+                    self._log("Google OAuth complete.")
                 else:
-                    self._ui(lambda: self.auth_dot.config(text="✗", fg=RED))
-                    self._log("Google OAuth failed.")
+                    self._log("Browser redirect failed — offering manual flow...")
+                    self._ui(lambda: self._offer_manual_oauth(secrets_path))
             except Exception as e:
-                self._ui(lambda err=str(e): self.auth_dot.config(text="✗", fg=RED))
                 self._log(f"OAuth error: {e}")
+                self._ui(lambda err=str(e): (
+                    self.auth_dot.config(text="x", fg=RED),
+                    self.auth_status_lbl.config(text=f"Error: {err[:50]}", fg=RED),
+                ))
 
         _th.Thread(target=_oauth_thread, daemon=True).start()
 
+    def _offer_manual_oauth(self, secrets_path):
+        """Fallback: show a window to manually paste the OAuth code."""
+        try:
+            import pipeline as P
+            url = P.run_oauth_flow_manual(secrets_path)
+            if url.startswith("ERROR"):
+                messagebox.showerror("OAuth Error", url)
+                return
+        except Exception as e:
+            messagebox.showerror("OAuth Error", str(e))
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Manual YouTube Connect")
+        win.configure(bg=BG)
+        win.geometry("620x440")
+
+        tk.Label(win, text="Step 1 — Open this URL in your browser:",
+                 bg=BG, fg=TEXT, font=FONT_MED).pack(anchor="w", padx=20, pady=(20, 4))
+        url_box = tk.Text(win, bg=BG2, fg=ACCENT2, font=("Consolas", 9),
+                          height=4, wrap="char", bd=0)
+        url_box.insert("1.0", url)
+        url_box.config(state="disabled")
+        url_box.pack(fill="x", padx=20, pady=4)
+        ttk.Button(win, text="Copy URL",
+                   command=lambda: (win.clipboard_clear(), win.clipboard_append(url))
+                   ).pack(anchor="w", padx=20, pady=4)
+
+        tk.Label(win, text="Step 2 — Paste the code Google shows you:",
+                 bg=BG, fg=TEXT, font=FONT_MED).pack(anchor="w", padx=20, pady=(12, 4))
+        code_var = tk.StringVar()
+        tk.Entry(win, textvariable=code_var, bg=BG2, fg=TEXT,
+                 insertbackground=TEXT, font=FONT_MED, width=52, bd=0
+                 ).pack(anchor="w", padx=20, ipady=8)
+
+        status_lbl = tk.Label(win, text="", bg=BG, fg=GREEN, font=FONT_MED)
+        status_lbl.pack(anchor="w", padx=20, pady=8)
+
+        def _exchange():
+            code = code_var.get().strip()
+            if not code:
+                status_lbl.config(text="Paste the code first.", fg=RED)
+                return
+            status_lbl.config(text="Connecting...", fg=YELLOW)
+            def _do():
+                try:
+                    import pipeline as P2
+                    ok = P2.exchange_oauth_code(secrets_path, code)
+                    if ok:
+                        self._ui(lambda: (
+                            self.auth_dot.config(text="●", fg=GREEN),
+                            self.auth_status_lbl.config(text="Connected", fg=GREEN),
+                            self.yt_auth_done.set(True),
+                        ))
+                        self._log("Manual OAuth complete.")
+                        win.after(0, win.destroy)
+                    else:
+                        win.after(0, lambda: status_lbl.config(
+                            text="Code exchange failed. Try again.", fg=RED))
+                except Exception as ex:
+                    win.after(0, lambda: status_lbl.config(text=str(ex)[:60], fg=RED))
+            import threading as _th
+            _th.Thread(target=_do, daemon=True).start()
+
+        ttk.Button(win, text="Connect", command=_exchange
+                   ).pack(anchor="w", padx=20, pady=8, ipadx=12, ipady=6)
+
     def _upload_now(self):
         if not self.yt_auth_done.get():
-            __import__('tkinter.messagebox', fromlist=['showwarning']).showwarning(
-                "Not Connected", "Connect your Google account first.")
+            messagebox.showwarning("Not Connected",
+                                   "Connect your Google account first.")
             return
         video_path = getattr(self, 'last_output_path',
-                             __import__('os').path.join(
-                                 __import__('os').path.expanduser("~"),
-                                 "Desktop", "reaction_output.mp4"))
-        if not __import__('os').path.exists(video_path):
-            __import__('tkinter.messagebox', fromlist=['showwarning']).showwarning(
-                "No Video", f"No video found at:\n{video_path}\n\nGenerate one first, or select a file.")
+                             os.path.join(os.path.expanduser("~"),
+                                          "Desktop", "reaction_output.mp4"))
+        if not os.path.exists(video_path):
+            messagebox.showwarning("No Video",
+                                   f"No video found at:\n{video_path}\n\n"
+                                   "Generate one first, or select a file.")
             return
+        # Snapshot tkinter vars on the main thread before spawning worker
+        self._pending_upload = {
+            "path":    video_path,
+            "title":   self.title_entry.get(),
+            "privacy": self.privacy_var.get(),
+            "niche":   self.niche_var.get(),
+        }
         self._ui(lambda: self.upload_status.config(text="Uploading...", fg=YELLOW))
         threading.Thread(target=self._upload_worker, daemon=True).start()
 
     def _upload_worker(self):
-        """Real upload worker — calls pipeline.upload_to_youtube."""
+        """Upload worker — uses pre-snapshotted values, fully thread-safe."""
         try:
             import pipeline as P
         except ImportError as e:
@@ -1055,31 +1175,40 @@ class ReactionStudio(tk.Tk):
                 text=f"Import error: {e}", fg=RED))
             return
 
-        video_path = getattr(self, 'last_output_path',
-                             os.path.join(os.path.expanduser("~"),
-                                          "Desktop", "reaction_output.mp4"))
-        title   = getattr(self, 'title_entry', None)
-        t       = title.get() if title else "Reaction Video"
-        priv = self.privacy_var.get() if hasattr(self, 'privacy_var') else 'public'
+        # Read from snapshot (set on main thread in _upload_now)
+        snap       = getattr(self, '_pending_upload', {})
+        video_path = snap.get("path", os.path.join(
+            os.path.expanduser("~"), "Desktop", "reaction_output.mp4"))
+        title      = snap.get("title", "Reaction Video")
+        privacy    = snap.get("privacy", "public")
+        niche      = snap.get("niche", "")
 
+        self._log(f"Uploading: {video_path}")
         self._ui(lambda: self.upload_status.config(
             text="Uploading to YouTube...", fg=YELLOW))
-        self._log(f"Uploading: {video_path}")
 
         try:
             result_url = P.upload_to_youtube(
                 video_path=video_path,
-                title=t,
-                description=f"Reaction video generated by Reaction Studio\nNiche: {self.niche_var.get()}",
-                privacy=priv,
+                title=title,
+                description=f"Reaction video by Reaction Studio\nNiche: {niche}",
+                privacy=privacy,
             )
             if result_url.startswith("ERROR"):
-                self._ui(lambda u=result_url: self.upload_status.config(
-                    text=f"Upload failed: {u[7:60]}", fg=RED))
+                msg = result_url[7:]
+                if "re-connect" in msg or "Token" in msg or "expired" in msg:
+                    self._ui(lambda: (
+                        self.auth_dot.config(text="x", fg=RED),
+                        self.auth_status_lbl.config(
+                            text="Token expired — reconnect", fg=RED),
+                        self.yt_auth_done.set(False),
+                    ))
+                self._ui(lambda m=msg: self.upload_status.config(
+                    text=f"Upload failed: {m[:80]}", fg=RED))
                 self._log(f"Upload failed: {result_url}")
             else:
                 self._ui(lambda u=result_url: self.upload_status.config(
-                    text=f"Uploaded! {u}", fg=GREEN))
+                    text=f"Uploaded!  {u}", fg=GREEN))
                 self._log(f"Uploaded: {result_url}")
         except Exception as e:
             self._ui(lambda err=str(e): self.upload_status.config(
