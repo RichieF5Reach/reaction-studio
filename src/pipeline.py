@@ -78,14 +78,16 @@ def find_trending_video(niche: str, max_duration_sec: int = 1200) -> dict:
         except Exception as e:
             print(f"[find_trending_video] query '{search_query}': {e}")
 
-    # Hard fallback — a public domain / CC video that always works
+    # Hard fallback — a long-form public domain video (NASA ISS tour, ~25min)
+    # Using a video with substantial duration so the reaction pipeline
+    # has enough content to work with (crashout markers, captions, etc.)
     print("[find_trending_video] All queries failed — using fallback video")
     return {
-        "url":       "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-        "title":     "Me at the zoo (first YouTube video ever)",
-        "duration":  19,
+        "url":       "https://www.youtube.com/watch?v=Bp3LkFHmCME",
+        "title":     "NASA ISS Tour (public domain, ~25 minutes)",
+        "duration":  1500,
         "thumbnail": "",
-        "uploader":  "jawed",
+        "uploader":  "NASA",
     }
 
 
@@ -122,8 +124,10 @@ def generate_script(video_title: str, niche: str,
         "stream": False,
     }
     try:
+        # (10, 300): 10s to connect (fast-fail if Ollama not running),
+        #            300s for the model to finish generating
         r = requests.post("http://localhost:11434/api/generate",
-                          json=payload, timeout=300)
+                          json=payload, timeout=(10, 300))
         if r.status_code == 200:
             text = r.json().get("response", "").strip()
             if text:
@@ -163,13 +167,23 @@ def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bo
         return False
 
     segment_files = []
-    tmp_dir = Path(tempfile.mkdtemp())
+    # TemporaryDirectory auto-cleans on exit — no more temp dir leaks
+    _tmp_ctx = tempfile.TemporaryDirectory(prefix="reaction_tts_")
+    tmp_dir  = Path(_tmp_ctx.name)
 
     # Determine piper binary
-    piper_cmd = voice_model_path if (voice_model_path and
-                                     os.path.isfile(voice_model_path) and
-                                     voice_model_path.endswith(".onnx")) else None
+    # Use the supplied path only if it's a real .onnx file that actually exists
+    piper_cmd = (
+        voice_model_path
+        if (voice_model_path
+            and voice_model_path.endswith(".onnx")
+            and os.path.isfile(voice_model_path))
+        else None
+    )
     model_arg = piper_cmd or "en_US-lessac-medium"
+    if voice_model_path and voice_model_path.endswith(".onnx") and not piper_cmd:
+        print(f"[synthesize_voice] .onnx model not found: {voice_model_path!r} — "
+              "falling back to en_US-lessac-medium")
 
     for i, line in enumerate(lines[:60]):
         seg_path = tmp_dir / f"seg_{i:03d}.wav"
@@ -187,6 +201,7 @@ def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bo
 
     if not segment_files:
         print("[synthesize_voice] No segments produced.")
+        _tmp_ctx.cleanup()
         return False
 
     list_file = tmp_dir / "concat.txt"
@@ -199,9 +214,11 @@ def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bo
         success = result.returncode == 0 and os.path.exists(output_path)
         if not success:
             print(f"[synthesize_voice] ffmpeg failed: {result.stderr.decode()[:300]}")
+        _tmp_ctx.cleanup()
         return success
     except Exception as e:
         print(f"[synthesize_voice] ffmpeg: {e}")
+        _tmp_ctx.cleanup()
         return False
 
 
@@ -249,11 +266,14 @@ def download_video(url: str, output_dir: str) -> str:
                 if candidates:
                     return candidates[0]
             else:
-                print(f"[download_video] fmt='{fmt}' failed: {result.stderr[:200]}")
+                _last_err = result.stderr[:300].strip()
+                print(f"[download_video] fmt='{fmt}' failed: {_last_err}")
         except Exception as e:
+            _last_err = str(e)
             print(f"[download_video] {e}")
 
-    return ""
+    # Return a descriptive error string so callers can surface it to the user
+    return f"ERROR: {_last_err}" if '_last_err' in dir() else "ERROR: download failed"
 
 
 # ─────────────────────────────────────────────
@@ -386,8 +406,11 @@ def compose_video(source_video: str, voice_audio: str,
         final = CompositeVideoClip(extra_clips)
 
         # Attach audio: prefer reaction voice, fall back to original source audio
+        # Trim voice to source duration so audio never runs past video end
         if voice is not None:
-            final = final.with_audio(voice)
+            voice_trimmed = voice.with_duration(
+                min(voice.duration, source.duration))
+            final = final.with_audio(voice_trimmed)
         elif original_audio is not None:
             final = final.with_audio(original_audio)
 
@@ -741,11 +764,22 @@ def upload_to_youtube(video_path: str, title: str,
             part="snippet,status", body=body, media_body=media)
 
         response = None
+        _chunk_retries = 0
         while response is None:
-            status, response = request.next_chunk()
-            if status:
-                pct = int(status.progress() * 100)
-                print(f"[upload_to_youtube] {pct}%")
+            try:
+                status, response = request.next_chunk()
+                _chunk_retries = 0   # reset on success
+                if status:
+                    pct = int(status.progress() * 100)
+                    print(f"[upload_to_youtube] {pct}%")
+            except Exception as chunk_err:
+                _chunk_retries += 1
+                if _chunk_retries > 3:
+                    raise RuntimeError(
+                        f"Upload failed after 3 retries: {chunk_err}") from chunk_err
+                print(f"[upload_to_youtube] chunk error (retry {_chunk_retries}/3): "
+                      f"{chunk_err}")
+                time.sleep(2 ** _chunk_retries)
 
         video_id = response.get("id", "")
         if not video_id:

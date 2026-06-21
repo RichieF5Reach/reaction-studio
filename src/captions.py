@@ -103,14 +103,22 @@ def _parse_srt_file(srt_path: str) -> List[Tuple[float, float, str]]:
 
 
 def _srt_time_to_seconds(ts: str) -> float:
-    ts = ts.replace(",", ".")
+    ts    = ts.replace(",", ".")
     parts = ts.split(":")
     try:
-        h  = int(parts[0])
-        m  = int(parts[1])
-        sf = float(parts[2])
-        return h * 3600 + m * 60 + sf
-    except Exception:
+        if len(parts) == 3:          # HH:MM:SS.mmm (normal SRT)
+            h, m, sf = int(parts[0]), int(parts[1]), float(parts[2])
+            return h * 3600 + m * 60 + sf
+        elif len(parts) == 2:        # MM:SS (truncated)
+            m, sf = int(parts[0]), float(parts[1])
+            return m * 60 + sf
+        elif len(parts) == 1:        # bare seconds
+            return float(parts[0])
+        else:
+            print(f"[_srt_time_to_seconds] unexpected format: {ts!r}")
+            return 0.0
+    except (ValueError, IndexError) as e:
+        print(f"[_srt_time_to_seconds] parse error for {ts!r}: {e}")
         return 0.0
 
 

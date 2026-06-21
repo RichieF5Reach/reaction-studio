@@ -315,9 +315,13 @@ class ReactionStudio(tk.Tk):
             else:
                 pkg = pip_deps.get(dep_name, dep_name)
                 try:
+                    # Large packages (piper-tts, openai-whisper) can be 500MB+
+                    # Use 600s timeout so slow connections don't false-fail
+                    _big_pkgs = {"piper-tts", "openai-whisper", "moviepy"}
+                    _timeout  = 600 if any(p in pkg for p in _big_pkgs) else 180
                     result = subprocess.run(
                         [sys.executable, "-m", "pip", "install"] + pkg.split() + ["-q"],
-                        capture_output=True, timeout=120)
+                        capture_output=True, timeout=_timeout)
                     ok = result.returncode == 0
                 except Exception:
                     ok = False
@@ -869,8 +873,14 @@ class ReactionStudio(tk.Tk):
         if video_info.get("url"):
             try:
                 src_video = P.download_video(video_info["url"], tmp_dir)
-                _step_progress("captions", 100, 3)
-                self._log(f"Video downloaded: {src_video}")
+                if src_video and src_video.startswith("ERROR:"):
+                    # download_video returned a descriptive error
+                    self._log(f"[download] failed: {src_video}")
+                    _step_error("captions", src_video[7:60])
+                    src_video = ""
+                else:
+                    _step_progress("captions", 100, 3)
+                    self._log(f"Video downloaded: {src_video}")
             except Exception as e:
                 self._log(f"[download] error: {e}")
                 src_video = ""
@@ -1023,19 +1033,23 @@ class ReactionStudio(tk.Tk):
         return frame
 
     def _restore_auth_state(self):
-        """Check on startup if a valid token already exists — restore green dot."""
+        """
+        Check for a saved token on startup. Runs is_authenticated() in a
+        background thread so a token refresh (network call) never blocks the GUI.
+        """
         def _check():
             try:
                 import pipeline as P
-                if P.is_authenticated():
-                    self._ui(lambda: (
-                        self.auth_dot.config(text="●", fg=GREEN),
-                        self.auth_status_lbl.config(text="Connected", fg=GREEN),
-                        self.yt_auth_done.set(True),
-                    ))
-                    self._log("YouTube: existing token valid.")
-            except Exception as e:
-                self._log(f"[auth restore] {e}")
+                ok = P.is_authenticated()
+            except Exception:
+                ok = False
+            if ok:
+                self._ui(lambda: (
+                    self.auth_dot.config(text="●", fg=GREEN),
+                    self.auth_status_lbl.config(text="Connected", fg=GREEN),
+                    self.yt_auth_done.set(True),
+                ))
+            # If not ok, leave the default 'Not connected' state as-is
         import threading as _th
         _th.Thread(target=_check, daemon=True).start()
 
