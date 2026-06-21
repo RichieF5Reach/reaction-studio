@@ -262,10 +262,10 @@ class App(tk.Tk):
                 subprocess.Popen(
                     [python_exe, main_py],
                     cwd=os.path.join(APP_DIR, "src"),
-                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                    # No creationflags — keep normal window so startup errors are visible
                 )
             except Exception:
-                # Last resort: shell=True lets Windows find python on its own
+                # Last resort: shell=True
                 subprocess.Popen(
                     f'start "" "{python_exe}" "{main_py}"',
                     shell=True,

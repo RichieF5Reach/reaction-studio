@@ -141,11 +141,27 @@ class ReactionStudio(tk.Tk):
         self.caption_style_var= tk.StringVar(value="Bold Yellow")
         self.log_lines        = []
 
-        self._style()
-        self._build_nav()
-        self._build_pages()
-        self.show_page("setup")
-        self._tick_crashout()
+        try:
+            self._style()
+            self._build_nav()
+            self._build_pages()
+            self.show_page("setup")
+            self._tick_crashout()
+        except Exception as _e:
+            import traceback as _tb
+            _msg = _tb.format_exc()
+            _log = os.path.join(os.path.expanduser("~"), "Desktop", "ReactionStudio_error.txt")
+            try:
+                with open(_log, "w") as _f:
+                    _f.write(_msg)
+            except Exception:
+                pass
+            messagebox.showerror(
+                "Startup Error",
+                f"Reaction Studio failed to initialise:\n\n{str(_e)}\n\n"
+                f"Full traceback saved to:\n{_log}"
+            )
+            raise
 
     # ── thread-safe GUI helper ────────────────
     def _ui(self, fn):
@@ -1351,5 +1367,40 @@ class ReactionStudio(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = ReactionStudio()
-    app.mainloop()
+    import traceback as _tb, os as _os
+
+    # Crash log on the Desktop so errors are visible even without a console
+    _log = _os.path.join(_os.path.expanduser("~"), "Desktop", "ReactionStudio_error.txt")
+
+    try:
+        app = ReactionStudio()
+        app.mainloop()
+    except Exception as _e:
+        _msg = _tb.format_exc()
+        try:
+            with open(_log, "w") as _f:
+                _f.write(_msg)
+        except Exception:
+            pass
+        # Try to show the error in a basic Tk window
+        try:
+            import tkinter as _tk
+            _root = _tk.Tk()
+            _root.title("Reaction Studio — Startup Error")
+            _root.configure(bg="#0f0f0f")
+            _tk.Label(_root, text="Reaction Studio failed to start:",
+                      fg="#ef4444", bg="#0f0f0f",
+                      font=("Segoe UI", 12, "bold")).pack(padx=20, pady=(20, 4))
+            _tk.Label(_root, text=str(_e),
+                      fg="#f5f5f5", bg="#0f0f0f",
+                      font=("Consolas", 9), wraplength=560).pack(padx=20, pady=(0, 8))
+            _tk.Label(_root,
+                      text=f"Full traceback saved to:\n{_log}",
+                      fg="#888888", bg="#0f0f0f",
+                      font=("Segoe UI", 9)).pack(padx=20, pady=(0, 16))
+            _tk.Button(_root, text="Close", command=_root.destroy,
+                       bg="#7c3aed", fg="white",
+                       font=("Segoe UI", 10)).pack(pady=(0, 20))
+            _root.mainloop()
+        except Exception:
+            pass
