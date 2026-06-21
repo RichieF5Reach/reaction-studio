@@ -417,6 +417,36 @@ def compose_video(source_video: str, voice_audio: str,
 # ─────────────────────────────────────────────
 YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
+# ─────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────
+def _validate_client_secrets(path: str) -> str:
+    """
+    Returns "" if file looks OK, or a human-readable error string.
+    Catches the very common mistake of downloading a 'web' client instead
+    of a 'Desktop app' client from Google Console.
+    """
+    import json as _json
+    try:
+        data = _json.loads(Path(path).read_text())
+    except Exception as e:
+        return f"Cannot read client_secrets.json: {e}"
+    if "installed" not in data and "web" in data:
+        return (
+            "Your client_secrets.json is for a 'Web Application' — "
+            "Reaction Studio needs a 'Desktop app' OAuth client.\n\n"
+            "Fix: Go to console.cloud.google.com → Credentials → "
+            "Edit your OAuth Client → change Application type to "
+            "'Desktop app' → save → download again."
+        )
+    if "installed" not in data:
+        return (
+            "client_secrets.json format not recognised. "
+            "Make sure you downloaded an OAuth 2.0 Client ID "
+            "(Desktop app) from Google Console."
+        )
+    return ""
+
 
 # ─────────────────────────────────────────────
 #  OAUTH — check if already authenticated
@@ -441,70 +471,190 @@ def is_authenticated() -> bool:
 
 
 # ─────────────────────────────────────────────
-#  OAUTH — full flow
+#  OAUTH — browser-based local server flow
 # ─────────────────────────────────────────────
 def run_oauth_flow(client_secrets_path: str) -> bool:
     """
-    Run Google OAuth flow using the provided client_secrets.json.
-    Uses run_local_server with explicit port 8080 and a 120s timeout
-    so it doesn't hang silently on redirect failure.
+    Run Google OAuth via a local redirect server.
+
+    Key fixes vs previous version:
+    - Validates the secrets file type FIRST with a clear error message.
+    - Recreates the InstalledAppFlow fresh for each port attempt
+      (reusing the same flow instance after failure is undefined behaviour).
+    - Uses 'continue' not 'break' on non-OSError so all ports are tried.
+    - Timeout and other non-port errors continue the loop, not abort it.
     """
+    # Validate file before trying anything
+    err = _validate_client_secrets(client_secrets_path)
+    if err:
+        print(f"[run_oauth_flow] {err}")
+        raise ValueError(err)   # Re-raised so UI can show it to user
+
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
-        flow = InstalledAppFlow.from_client_secrets_file(
-            client_secrets_path, YT_SCOPES)
-        # Try port 8080 first (more reliable on Windows), fall back to random port
-        for port in [8080, 8090, 8888, 0]:
-            try:
-                creds = flow.run_local_server(
-                    port=port,
-                    open_browser=True,
-                    timeout_seconds=120,
-                    success_message=(
-                        "Reaction Studio is now connected to YouTube! "
-                        "You can close this tab."
-                    ),
-                )
-                TOKEN_PATH.write_text(creds.to_json())
-                print(f"[run_oauth_flow] Token saved to {TOKEN_PATH}")
-                return True
-            except OSError:
-                # Port in use — try next
-                continue
-            except Exception as e:
-                print(f"[run_oauth_flow] port {port} error: {e}")
-                break
-    except Exception as e:
-        print(f"[run_oauth_flow] {e}")
+    except ImportError:
+        raise ImportError(
+            "google-auth-oauthlib is not installed.\n"
+            "Run: pip install google-auth-oauthlib")
+
+    last_error = None
+    for port in [8080, 8090, 8888, 9090, 0]:
+        try:
+            # Fresh flow instance per attempt — avoids stale internal state
+            flow = InstalledAppFlow.from_client_secrets_file(
+                client_secrets_path, YT_SCOPES)
+            creds = flow.run_local_server(
+                port=port,
+                open_browser=True,
+                timeout_seconds=180,
+                success_message=(
+                    "Connected! Reaction Studio is now linked to YouTube. "
+                    "You can close this tab."
+                ),
+            )
+            TOKEN_PATH.write_text(creds.to_json())
+            print(f"[run_oauth_flow] Success on port {port}. Token saved.")
+            return True
+        except OSError as e:
+            # Port already in use — try next port
+            print(f"[run_oauth_flow] Port {port} busy: {e}")
+            last_error = e
+            continue
+        except Exception as e:
+            # Timeout, user cancelled, network error, etc. — try next port
+            print(f"[run_oauth_flow] Port {port} error ({type(e).__name__}): {e}")
+            last_error = e
+            continue   # ← was 'break' — this was the primary failure cause
+
+    print(f"[run_oauth_flow] All ports failed. Last error: {last_error}")
     return False
 
 
 # ─────────────────────────────────────────────
-#  OAUTH — headless / manual fallback
+#  OAUTH — manual copy-paste fallback
+#  NOTE: Google removed OOB ("urn:ietf:wg:oauth:2.0:oob") on Jan 31 2023.
+#  The replacement is a loopback redirect with a custom port.
+#  We run a minimal HTTP server on a fixed port and redirect there.
 # ─────────────────────────────────────────────
-def run_oauth_flow_manual(client_secrets_path: str) -> str:
+def run_oauth_flow_manual(client_secrets_path: str) -> dict:
     """
-    Returns an authorization URL for the user to open manually.
-    The user pastes the code back; call exchange_oauth_code() with it.
+    Starts a minimal loopback HTTP listener on port 8765, builds an
+    auth URL the user opens in any browser, then waits up to 5 minutes
+    for the redirect. Returns dict:
+      {"status": "waiting", "url": "https://accounts.google.com/..."}
+    on success (listener started), or
+      {"status": "error", "message": "..."}
+    on failure.
+
+    The listener saves the token automatically when Google redirects back.
+    Check is_authenticated() after ~5 min or listen for the callback.
     """
+    err = _validate_client_secrets(client_secrets_path)
+    if err:
+        return {"status": "error", "message": err}
+
+    import threading as _th
+    import http.server as _hs
+    import urllib.parse as _up
+
+    MANUAL_PORT = 8765
+    result_container = {"done": False, "error": None}
+
     try:
-        from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_secrets_file(
-            client_secrets_path, YT_SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob")
-        auth_url, _ = flow.authorization_url(prompt="consent")
-        # stash flow for exchange
-        _PENDING_FLOWS[client_secrets_path] = flow
-        return auth_url
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        flow = InstalledAppFlow.from_client_secrets_file(
+            client_secrets_path, YT_SCOPES)
+
+        redirect_uri = f"http://localhost:{MANUAL_PORT}/"
+        flow.redirect_uri = redirect_uri
+        auth_url, _ = flow.authorization_url(
+            prompt="consent",
+            access_type="offline",
+        )
+
+        class _Handler(_hs.BaseHTTPRequestHandler):
+            def do_GET(self):
+                parsed   = _up.urlparse(self.path)
+                params   = _up.parse_qs(parsed.query)
+                code_lst = params.get("code", [])
+                err_lst  = params.get("error", [])
+
+                if err_lst:
+                    result_container["error"] = err_lst[0]
+                    self._respond("Access denied — check Google Console settings.")
+                elif code_lst:
+                    try:
+                        flow.fetch_token(code=code_lst[0])
+                        TOKEN_PATH.write_text(flow.credentials.to_json())
+                        result_container["done"] = True
+                        self._respond(
+                            "Connected! Reaction Studio is linked to YouTube. "
+                            "You can close this tab.")
+                    except Exception as ex:
+                        result_container["error"] = str(ex)
+                        self._respond(f"Token exchange failed: {ex}")
+                else:
+                    self._respond("Waiting for Google callback...")
+
+                # Signal server to stop
+                _th.Thread(target=self.server.shutdown, daemon=True).start()
+
+            def _respond(self, msg):
+                body = (
+                    f"<html><body style='font-family:sans-serif;padding:40px;"
+                    f"background:#111;color:#eee'>"
+                    f"<h2>{msg}</h2></body></html>"
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # Suppress access logs
+
+        server = _hs.HTTPServer(("127.0.0.1", MANUAL_PORT), _Handler)
+        server.timeout = 300   # 5 minute timeout
+
+        def _serve():
+            try:
+                server.handle_request()   # handles ONE request then stops
+            except Exception as ex:
+                result_container["error"] = str(ex)
+
+        _th.Thread(target=_serve, daemon=True).start()
+        _PENDING_MANUAL["flow"]      = flow
+        _PENDING_MANUAL["container"] = result_container
+
+        return {"status": "waiting", "url": auth_url}
+
     except Exception as e:
-        return f"ERROR: {e}"
+        return {"status": "error", "message": str(e)}
 
 
+_PENDING_MANUAL: dict = {}
+
+
+def check_manual_auth_result() -> dict:
+    """
+    Poll this after run_oauth_flow_manual() to see if the user completed auth.
+    Returns: {"status": "done"} | {"status": "waiting"} | {"status": "error", "message": ...}
+    """
+    container = _PENDING_MANUAL.get("container", {})
+    if container.get("done"):
+        return {"status": "done"}
+    if container.get("error"):
+        return {"status": "error", "message": container["error"]}
+    return {"status": "waiting"}
+
+
+# Legacy — kept for backward compatibility but now unused
 _PENDING_FLOWS: dict = {}
 
 
 def exchange_oauth_code(client_secrets_path: str, code: str) -> bool:
-    """Complete the manual OAuth flow by exchanging the code."""
+    """Kept for backward compat — prefer run_oauth_flow_manual + check_manual_auth_result."""
     flow = _PENDING_FLOWS.get(client_secrets_path)
     if not flow:
         return False

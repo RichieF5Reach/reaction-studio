@@ -1067,6 +1067,21 @@ class ReactionStudio(tk.Tk):
                 else:
                     self._log("Browser redirect failed — offering manual flow...")
                     self._ui(lambda: self._offer_manual_oauth(secrets_path))
+            except ValueError as ve:
+                # Wrong client type (web vs desktop), bad JSON, etc — show clear dialog
+                self._log(f"OAuth setup error: {ve}")
+                self._ui(lambda m=str(ve): (
+                    self.auth_dot.config(text="x", fg=RED),
+                    self.auth_status_lbl.config(text="Setup error — see dialog", fg=RED),
+                    messagebox.showerror("YouTube Setup Error", m),
+                ))
+            except ImportError as ie:
+                self._log(f"Missing package: {ie}")
+                self._ui(lambda m=str(ie): (
+                    self.auth_dot.config(text="x", fg=RED),
+                    self.auth_status_lbl.config(text="Missing package", fg=RED),
+                    messagebox.showerror("Missing Package", m),
+                ))
             except Exception as e:
                 self._log(f"OAuth error: {e}")
                 self._ui(lambda err=str(e): (
@@ -1077,71 +1092,115 @@ class ReactionStudio(tk.Tk):
         _th.Thread(target=_oauth_thread, daemon=True).start()
 
     def _offer_manual_oauth(self, secrets_path):
-        """Fallback: show a window to manually paste the OAuth code."""
+        """
+        Fallback auth window — uses a local loopback server (port 8765) instead
+        of the old OOB flow which Google killed in 2023.
+        The user opens the URL in their browser; we wait for the redirect callback.
+        """
         try:
             import pipeline as P
-            url = P.run_oauth_flow_manual(secrets_path)
-            if url.startswith("ERROR"):
-                messagebox.showerror("OAuth Error", url)
-                return
+            result = P.run_oauth_flow_manual(secrets_path)
         except Exception as e:
             messagebox.showerror("OAuth Error", str(e))
+            self._ui(lambda: (
+                self.auth_dot.config(text="x", fg=RED),
+                self.auth_status_lbl.config(text="Failed", fg=RED),
+            ))
             return
 
+        if result.get("status") == "error":
+            msg = result.get("message", "Unknown error")
+            messagebox.showerror("OAuth Error", msg)
+            self._ui(lambda: (
+                self.auth_dot.config(text="x", fg=RED),
+                self.auth_status_lbl.config(text=msg[:50], fg=RED),
+            ))
+            return
+
+        # Build the "waiting" window
+        auth_url = result.get("url", "")
         win = tk.Toplevel(self)
-        win.title("Manual YouTube Connect")
+        win.title("Connect YouTube Account")
         win.configure(bg=BG)
-        win.geometry("620x440")
+        win.geometry("660x420")
+        win.resizable(False, False)
 
         tk.Label(win, text="Step 1 — Open this URL in your browser:",
                  bg=BG, fg=TEXT, font=FONT_MED).pack(anchor="w", padx=20, pady=(20, 4))
+
         url_box = tk.Text(win, bg=BG2, fg=ACCENT2, font=("Consolas", 9),
                           height=4, wrap="char", bd=0)
-        url_box.insert("1.0", url)
+        url_box.insert("1.0", auth_url)
         url_box.config(state="disabled")
         url_box.pack(fill="x", padx=20, pady=4)
-        ttk.Button(win, text="Copy URL",
-                   command=lambda: (win.clipboard_clear(), win.clipboard_append(url))
-                   ).pack(anchor="w", padx=20, pady=4)
 
-        tk.Label(win, text="Step 2 — Paste the code Google shows you:",
-                 bg=BG, fg=TEXT, font=FONT_MED).pack(anchor="w", padx=20, pady=(12, 4))
-        code_var = tk.StringVar()
-        tk.Entry(win, textvariable=code_var, bg=BG2, fg=TEXT,
-                 insertbackground=TEXT, font=FONT_MED, width=52, bd=0
-                 ).pack(anchor="w", padx=20, ipady=8)
+        btn_row = tk.Frame(win, bg=BG)
+        btn_row.pack(anchor="w", padx=20, pady=4)
+        ttk.Button(btn_row, text="Copy URL",
+                   command=lambda: (win.clipboard_clear(),
+                                    win.clipboard_append(auth_url))
+                   ).pack(side="left", ipadx=8, ipady=4)
 
-        status_lbl = tk.Label(win, text="", bg=BG, fg=GREEN, font=FONT_MED)
-        status_lbl.pack(anchor="w", padx=20, pady=8)
+        import webbrowser as _wb
+        ttk.Button(btn_row, text="Open in Browser",
+                   command=lambda: _wb.open(auth_url)
+                   ).pack(side="left", padx=8, ipadx=8, ipady=4)
 
-        def _exchange():
-            code = code_var.get().strip()
-            if not code:
-                status_lbl.config(text="Paste the code first.", fg=RED)
+        tk.Label(win,
+                 text=(
+                     "Step 2 — Sign in with Google and allow access.\n"
+                     "You'll be redirected to http://localhost:8765/ — "
+                     "this page is served by Reaction Studio on your PC.\n"
+                     "The app will connect automatically when you complete the flow."
+                 ),
+                 bg=BG, fg=TEXT_DIM, font=("Segoe UI", 10),
+                 justify="left", wraplength=620
+                 ).pack(anchor="w", padx=20, pady=(12, 4))
+
+        status_lbl = tk.Label(win, text="Waiting for Google callback...",
+                              bg=BG, fg=YELLOW, font=FONT_MED)
+        status_lbl.pack(anchor="w", padx=20, pady=12)
+
+        # Poll every 2 seconds for up to 5 minutes
+        _poll_count = [0]
+        MAX_POLLS   = 150  # 150 * 2s = 5 min
+
+        def _poll():
+            if not win.winfo_exists():
                 return
-            status_lbl.config(text="Connecting...", fg=YELLOW)
-            def _do():
-                try:
-                    import pipeline as P2
-                    ok = P2.exchange_oauth_code(secrets_path, code)
-                    if ok:
-                        self._ui(lambda: (
-                            self.auth_dot.config(text="●", fg=GREEN),
-                            self.auth_status_lbl.config(text="Connected", fg=GREEN),
-                            self.yt_auth_done.set(True),
-                        ))
-                        self._log("Manual OAuth complete.")
-                        win.after(0, win.destroy)
-                    else:
-                        win.after(0, lambda: status_lbl.config(
-                            text="Code exchange failed. Try again.", fg=RED))
-                except Exception as ex:
-                    win.after(0, lambda: status_lbl.config(text=str(ex)[:60], fg=RED))
-            import threading as _th
-            _th.Thread(target=_do, daemon=True).start()
+            _poll_count[0] += 1
+            try:
+                import pipeline as P2
+                r = P2.check_manual_auth_result()
+            except Exception:
+                r = {"status": "waiting"}
 
-        ttk.Button(win, text="Connect", command=_exchange
-                   ).pack(anchor="w", padx=20, pady=8, ipadx=12, ipady=6)
+            if r["status"] == "done":
+                self._ui(lambda: (
+                    self.auth_dot.config(text="●", fg=GREEN),
+                    self.auth_status_lbl.config(text="Connected", fg=GREEN),
+                    self.yt_auth_done.set(True),
+                ))
+                self._log("YouTube connected via manual flow.")
+                win.after(1500, win.destroy)
+                return
+            elif r["status"] == "error":
+                err_msg = r.get("message", "Unknown error")
+                status_lbl.config(text=f"Error: {err_msg[:60]}", fg=RED)
+                self._log(f"Manual OAuth error: {err_msg}")
+                return  # stop polling
+            elif _poll_count[0] >= MAX_POLLS:
+                status_lbl.config(text="Timed out after 5 minutes.", fg=RED)
+                self._log("Manual OAuth timed out.")
+                return
+            else:
+                # Still waiting
+                dots = "." * (_poll_count[0] % 4 + 1)
+                status_lbl.config(
+                    text=f"Waiting for Google callback{dots}", fg=YELLOW)
+                win.after(2000, _poll)
+
+        win.after(2000, _poll)
 
     def _upload_now(self):
         if not self.yt_auth_done.get():
