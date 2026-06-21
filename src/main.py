@@ -3,12 +3,37 @@ REACTION STUDIO - Main Application
 Reaction video generator with local AI, TTS, auto-captions, filters, and YouTube upload
 """
 
+import sys
+import os
+import subprocess
+
+# ── Pre-flight: check tkinter is available before anything else ───────────────
+# On some Windows Python installs (Microsoft Store, minimal installs) Tcl/Tk
+# is missing. Detect this early and show a clear message instead of crashing.
+try:
+    import tkinter as _tk_test
+    _tk_test.Tk().destroy()   # actually open+close a window to confirm Tcl/Tk works
+except ImportError:
+    _msg = (
+        "Tkinter is not available in your Python installation.\n\n"
+        "Fix: Download the full Python installer from https://python.org/downloads\n"
+        "During install, make sure 'tcl/tk and IDLE' is checked.\n\n"
+        "If you used the Microsoft Store version of Python, uninstall it and\n"
+        "use the python.org installer instead."
+    )
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, _msg, "Reaction Studio — Missing Tcl/Tk", 0x10)
+    except Exception:
+        print(_msg)
+    sys.exit(1)
+except Exception as _e:
+    # Tcl/Tk present but can't open display — unlikely on Windows, log and continue
+    pass
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
-import subprocess
-import sys
-import os
 import time
 import random
 

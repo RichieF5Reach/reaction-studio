@@ -318,6 +318,28 @@ class App(tk.Tk):
 
         py_ok = subprocess.run(
             [PYTHON_EXE, "--version"], capture_output=True).returncode == 0
+
+        # ── Check tkinter is bundled with this Python ──────────────────────
+        if py_ok:
+            tk_check = subprocess.run(
+                [PYTHON_EXE, "-c", "import tkinter; tkinter.Tk().destroy()"],
+                capture_output=True, timeout=10)
+            if tk_check.returncode != 0:
+                self._log("WARNING: tkinter/Tcl-Tk not found in this Python install!")
+                self._log("  -> The app will crash on launch without it.")
+                self._log("  -> Fix: use the full python.org installer and check")
+                self._log("     'tcl/tk and IDLE' during setup.")
+                self._log("  -> Microsoft Store Python does NOT include Tcl/Tk.")
+                self._ui(lambda: messagebox.showwarning(
+                    "Missing Tcl/Tk",
+                    "Your Python installation is missing Tcl/Tk (required for the GUI).\n\n"
+                    "The app will not open without it.\n\n"
+                    "Fix:\n"
+                    "1. Download Python from https://python.org/downloads\n"
+                    "2. During install, check 'tcl/tk and IDLE'\n"
+                    "3. Run this installer again\n\n"
+                    "Note: Microsoft Store Python does NOT include Tcl/Tk."
+                ))
         if not py_ok:
             # Try bare "python" as last resort
             py_ok = subprocess.run(
