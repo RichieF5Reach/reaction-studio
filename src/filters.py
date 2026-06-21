@@ -8,6 +8,19 @@ Targets moviepy >= 2.0 (uses image_transform / transform, not fl_image / fl).
 # ─────────────────────────────────────────────
 #  Filter registry
 # ─────────────────────────────────────────────
+try:
+    import numpy as np
+    _NUMPY_OK = True
+except ImportError:
+    _NUMPY_OK = False
+    np = None  # type: ignore — each filter does its own lazy import
+
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+    _PIL_OK = True
+except ImportError:
+    _PIL_OK = False
+
 FILTERS = {
     "None":          None,
     "Dramatic":      "dramatic",
@@ -36,18 +49,15 @@ FILTER_DESCRIPTIONS = {
 
 
 def _u8(frame):
-    import numpy as np  # lazy import
     """Safely cast any frame dtype to uint8 — moviepy 2.x ColorClip returns int64."""
-    import numpy as _np
-    return _np.asarray(frame, dtype=_np.uint8)
+    return np.asarray(frame, dtype=np.uint8)
 
 
 # ─────────────────────────────────────────────
 #  Per-frame processors  (frame: np.ndarray HxWxC uint8)
 # ─────────────────────────────────────────────
-def _apply_dramatic(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
-    from PIL import Image, ImageDraw, ImageFont  # lazy import
+def _apply_dramatic(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     img = Image.fromarray(frame)
     img = ImageEnhance.Contrast(img).enhance(1.6)
@@ -56,8 +66,8 @@ def _apply_dramatic(frame: np.ndarray) -> np.ndarray:
     return np.array(img)
 
 
-def _apply_vhs(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_vhs(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     img = np.array(frame, dtype=np.float32)
     h, w = img.shape[:2]
@@ -69,8 +79,8 @@ def _apply_vhs(frame: np.ndarray) -> np.ndarray:
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def _apply_warm(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_warm(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     img = np.array(frame, dtype=np.float32)
     img[:, :, 0] = np.clip(img[:, :, 0] * 1.15, 0, 255)
@@ -79,8 +89,8 @@ def _apply_warm(frame: np.ndarray) -> np.ndarray:
     return img.astype(np.uint8)
 
 
-def _apply_cold(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_cold(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     img = np.array(frame, dtype=np.float32)
     img[:, :, 0] = np.clip(img[:, :, 0] * 0.85, 0, 255)
@@ -88,23 +98,22 @@ def _apply_cold(frame: np.ndarray) -> np.ndarray:
     return img.astype(np.uint8)
 
 
-def _apply_bw(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
-    from PIL import Image, ImageDraw, ImageFont  # lazy import
+def _apply_bw(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     return np.array(Image.fromarray(frame).convert("L").convert("RGB"))
 
 
-def _apply_contrast(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_contrast(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     img = np.array(frame, dtype=np.float32)
     img = (img - 50) * 1.4 + 50
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def _apply_vignette(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_vignette(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     h, w = frame.shape[:2]
     cx, cy = w / 2, h / 2
@@ -114,15 +123,14 @@ def _apply_vignette(frame: np.ndarray) -> np.ndarray:
     return np.clip(frame * mask, 0, 255).astype(np.uint8)
 
 
-def _apply_saturate(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
-    from PIL import Image, ImageDraw, ImageFont  # lazy import
+def _apply_saturate(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     return np.array(ImageEnhance.Color(Image.fromarray(frame)).enhance(2.2))
 
 
-def _apply_grain(frame: np.ndarray) -> np.ndarray:
-    import numpy as np  # lazy import
+def _apply_grain(frame):  # (np.ndarray -> np.ndarray)
+    import numpy as np
     frame = _u8(frame)
     noise = np.random.randint(-18, 18, frame.shape, dtype=np.int16)
     return np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
@@ -175,8 +183,6 @@ def filter_description(filter_name: str) -> str:
 # ─────────────────────────────────────────────
 def apply_crashout_zoom(clip, start: float, duration: float = 0.4,
                         zoom_factor: float = 1.15):
-    import numpy as np  # lazy import
-    from PIL import Image, ImageDraw, ImageFont  # lazy import
     """
     Quick zoom-punch at `start` seconds.
     moviepy 2.x: uses clip.transform(func) where func(get_frame, t) -> frame.
@@ -199,8 +205,6 @@ def apply_crashout_zoom(clip, start: float, duration: float = 0.4,
 
 
 def apply_shake(clip, start: float, duration: float = 0.6, intensity: int = 8):
-    import numpy as np  # lazy import
-    from PIL import Image, ImageDraw, ImageFont  # lazy import
     """
     Shake effect at `start` seconds.
     moviepy 2.x: uses clip.transform().
