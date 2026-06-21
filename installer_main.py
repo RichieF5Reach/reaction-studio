@@ -32,37 +32,39 @@ TEXT   = "#f5f5f5"
 DIM    = "#888888"
 
 
-def _find_pythonw() -> str:
+def _find_python() -> str:
     """
-    Locate pythonw.exe — the no-console Python launcher built into every
-    Python install. Returns full path or falls back to 'pythonw'.
-    Prefers the same Python that's running the installer.
+    Locate the best Python executable to launch the app with.
+    Prefers the same Python that ran the installer (guaranteed to exist).
+    Falls back to python.exe on PATH, then common install locations.
+    Note: we use python.exe + CREATE_NO_WINDOW instead of pythonw.exe
+    because pythonw.exe is not always present (e.g. Microsoft Store Python).
     """
-    # 1. Same install as the currently-running Python
-    candidate = os.path.join(sys.prefix, "pythonw.exe")
-    if os.path.isfile(candidate):
-        return candidate
+    # 1. The exact python.exe that ran this installer — always exists
+    if sys.executable and os.path.isfile(sys.executable):
+        return sys.executable
 
-    # 2. Parent directory of python.exe (handles venv layouts)
-    py = sys.executable or ""
-    if py:
-        candidate = os.path.join(os.path.dirname(py), "pythonw.exe")
+    # 2. python.exe next to the running executable
+    py_dir = os.path.dirname(sys.executable or "")
+    if py_dir:
+        candidate = os.path.join(py_dir, "python.exe")
         if os.path.isfile(candidate):
             return candidate
 
     # 3. PATH
     import shutil
-    found = shutil.which("pythonw")
+    found = shutil.which("python")
     if found:
         return found
 
     # 4. Common Windows install locations
-    for base in [r"C:\Python312", r"C:\Python311", r"C:\Python310"]:
-        candidate = os.path.join(base, "pythonw.exe")
+    for base in [r"C:\Python312", r"C:\Python311", r"C:\Python310",
+                 r"C:\Python39",  r"C:\Python38"]:
+        candidate = os.path.join(base, "python.exe")
         if os.path.isfile(candidate):
             return candidate
 
-    return "pythonw"   # last resort — rely on PATH
+    return "python"   # last resort
 
 
 def _create_shortcut(lnk_path: str, target_exe: str, args: str,
@@ -197,13 +199,19 @@ class App(tk.Tk):
     def _start(self):
         if self._done:
             # Launch the app: pythonw.exe src\main.py (no console window, AV-clean)
-            pythonw  = _find_pythonw()
-            main_py  = os.path.join(APP_DIR, "src", "main.py")
-            subprocess.Popen(
-                [pythonw, main_py],
-                cwd=os.path.join(APP_DIR, "src"),
-                creationflags=0x00000008,   # DETACHED_PROCESS
-            )
+            python_exe = _find_python()
+            main_py    = os.path.join(APP_DIR, "src", "main.py")
+            try:
+                pythonw_path = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+                launcher = pythonw_path if os.path.isfile(pythonw_path) else python_exe
+                subprocess.Popen(
+                    [launcher, main_py],
+                    cwd=os.path.join(APP_DIR, "src"),
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+            except Exception:
+                subprocess.Popen([python_exe, main_py],
+                                 cwd=os.path.join(APP_DIR, "src"))
             self.destroy()
             return
 
@@ -267,7 +275,10 @@ class App(tk.Tk):
         # ── Step 2: Desktop shortcut ──────────────────────────────────────
         # Points directly to pythonw.exe — no .vbs, no .cmd, no wscript.exe
         self._step(2, "run", "Creating Desktop shortcut...")
-        pythonw = _find_pythonw()
+        python_exe = _find_python()
+        # Use pythonw.exe if available (no console), else python.exe
+        _pyw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+        launcher   = _pyw if os.path.isfile(_pyw) else python_exe
         main_py = os.path.join(APP_DIR, "src", "main.py")
         ico     = os.path.join(APP_DIR, "assets", "icon.ico")
         workdir = os.path.join(APP_DIR, "src")
@@ -275,7 +286,7 @@ class App(tk.Tk):
 
         _create_shortcut(
             lnk_path    = lnk,
-            target_exe  = pythonw,
+            target_exe  = launcher,
             args        = f'"{main_py}"',
             workdir     = workdir,
             icon_path   = ico,
@@ -283,7 +294,7 @@ class App(tk.Tk):
         )
         self._step(2, "ok", "Desktop shortcut created")
         self._log(f"Shortcut: {lnk}")
-        self._log(f"  → {pythonw} \"{main_py}\"")
+        self._log(f"  → python.exe \"{main_py}\"")
         self._prog(80, "Shortcut done")
 
         # ── Step 3: Start Menu ────────────────────────────────────────────
@@ -292,7 +303,7 @@ class App(tk.Tk):
         sm_lnk = os.path.join(START_MENU, "Reaction Studio.lnk")
         _create_shortcut(
             lnk_path    = sm_lnk,
-            target_exe  = pythonw,
+            target_exe  = launcher,
             args        = f'"{main_py}"',
             workdir     = workdir,
             icon_path   = ico,
@@ -324,7 +335,7 @@ class App(tk.Tk):
         self._log("--- INSTALLATION COMPLETE ---")
         self._log(f"App folder: {APP_DIR}")
         self._log("Desktop:    Reaction Studio shortcut ready")
-        self._log("Launcher:   pythonw.exe (no console window)")
+        self._log("Launcher:   python.exe (CREATE_NO_WINDOW)")
         self._log("OPTIONAL:   Install Ollama → https://ollama.com  then: ollama pull llama3")
         self._log("OPTIONAL:   ffmpeg → https://ffmpeg.org/download.html")
 
