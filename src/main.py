@@ -731,6 +731,8 @@ class ReactionStudio(tk.Tk):
             'niche': niche, 'voice': voice, 'energy': energy,
             'style': style, 'crashout': crash,
             'vf': vf, 'cs': cs, 'cm': cm,
+            'auto_upload':  self.auto_upload_var.get() if hasattr(self, 'auto_upload_var') else False,
+            'yt_auth_done': self.yt_auth_done.get()    if hasattr(self, 'yt_auth_done')    else False,
         }
 
         summary = (f"Niche: {niche}  |  Filter: {vf}  |  "
@@ -803,7 +805,7 @@ class ReactionStudio(tk.Tk):
         # Read pre-snapshotted settings (set on main thread in _start_generate).
         # Never read tkinter widgets directly from a background thread.
         _s       = getattr(self, '_gen_settings', {})
-        niche    = _s.get('niche',   self.niche_var.get())
+        niche    = _s.get('niche',   'General')
         voice    = _s.get('voice',   '')
         energy   = _s.get('energy',  'High')
         style    = _s.get('style',   '')
@@ -943,11 +945,11 @@ class ReactionStudio(tk.Tk):
         ))
 
         # Auto-upload if enabled and auth done
-        if self.auto_upload_var.get() and self.yt_auth_done.get() and compose_ok:
+        if _s.get('auto_upload') and _s.get('yt_auth_done') and compose_ok:
             self._log("Auto-upload triggered...")
             threading.Thread(target=self._upload_worker, daemon=True).start()
         else:
-            self.after(1600, lambda: self.show_page("upload"))
+            self._ui(lambda: self.after(1600, lambda: self.show_page("upload")))
 
     # ════════════════════════════════════════
     #  PAGE: UPLOAD
