@@ -33,10 +33,39 @@ jobs:
               -OutFile "assets/icon.ico" -ErrorAction SilentlyContinue
           }
 
+      - name: Install app dependencies for bundling
+        run: |
+          pip install moviepy pillow requests numpy yt-dlp google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Build main app exe (self-contained, no Python needed)
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --onefile `
+            --noconsole `
+            --name "ReactionStudio" `
+            --icon "assets/icon.ico" `
+            --hidden-import "PIL._tkinter_finder" `
+            --hidden-import "tkinter" `
+            --hidden-import "tkinter.ttk" `
+            --hidden-import "tkinter.messagebox" `
+            --hidden-import "tkinter.filedialog" `
+            --hidden-import "filters" `
+            --hidden-import "captions" `
+            --hidden-import "pipeline" `
+            --hidden-import "winreg" `
+            --paths "src" `
+            --collect-all "moviepy" `
+            --collect-all "PIL" `
+            src/main.py
+
       - name: Build installer exe
         shell: pwsh
         run: |
-          # Generate embedded payload module
+          # Copy the bundled app exe into assets so installer can embed it
+          Copy-Item "dist/ReactionStudio.exe" "assets/ReactionStudio.exe"
+
+          # Generate embedded payload module (now includes the bundled app exe)
           python build_payload.py
 
           # Run PyInstaller on Windows — produces a real Windows PE exe

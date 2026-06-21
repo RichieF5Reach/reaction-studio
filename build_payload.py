@@ -18,6 +18,9 @@ BLOCKED_EXTENSIONS = {
     ".pyc", ".pyo", ".pyd",
 }
 
+# Explicitly allow the bundled app exe in assets/
+ALLOWED_FILES = {"assets/ReactionStudio.exe", "assets" + os.sep + "ReactionStudio.exe"}
+
 with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
     for dirpath, dirs, files in os.walk(root):
         # Never descend into these directories
@@ -28,6 +31,13 @@ with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for fname in files:
             full_path = os.path.join(dirpath, fname)
             arc_path  = os.path.relpath(full_path, root)
+
+            # Always allow the pre-built app exe
+            norm_arc = arc_path.replace("\\", "/")
+            if norm_arc in ("assets/ReactionStudio.exe",):
+                zf.write(full_path, arc_path)
+                print(f'  + {arc_path}  [bundled exe]')
+                continue
 
             # Must be inside src/ or assets/
             if not any(arc_path.startswith(p) for p in ALLOWED_PREFIXES):

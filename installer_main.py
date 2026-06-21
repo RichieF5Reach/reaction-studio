@@ -240,37 +240,13 @@ class App(tk.Tk):
     # ── install ───────────────────────────────────────────────────────────────
     def _start(self):
         if self._done:
-            main_py = os.path.join(APP_DIR, "src", "main.py")
-
-            # Read the python path we saved during install — most reliable source
-            _cfg = os.path.join(APP_DIR, "python_path.txt")
-            python_exe = None
-            if os.path.isfile(_cfg):
-                try:
-                    python_exe = open(_cfg).read().strip()
-                    if not os.path.isfile(python_exe):
-                        python_exe = None  # stale path — fall through
-                except Exception:
-                    python_exe = None
-
-            # Fallback: search PATH
-            if not python_exe:
-                import shutil as _sh2
-                python_exe = _sh2.which("pythonw") or _sh2.which("python") or "python"
-
+            # Launch the bundled exe — no Python install needed
+            app_exe = os.path.join(APP_DIR, "ReactionStudio.exe")
             try:
-                subprocess.Popen(
-                    [python_exe, main_py],
-                    cwd=os.path.join(APP_DIR, "src"),
-                    # No creationflags — keep normal window so startup errors are visible
-                )
-            except Exception:
-                # Last resort: shell=True
-                subprocess.Popen(
-                    f'start "" "{python_exe}" "{main_py}"',
-                    shell=True,
-                    cwd=os.path.join(APP_DIR, "src"),
-                )
+                subprocess.Popen([app_exe], cwd=APP_DIR)
+            except Exception as _e:
+                messagebox.showerror("Launch Error",
+                    f"Could not launch ReactionStudio.exe:\n{_e}\n\nPath: {app_exe}")
             self.destroy()
             return
 
@@ -319,27 +295,7 @@ class App(tk.Tk):
         py_ok = subprocess.run(
             [PYTHON_EXE, "--version"], capture_output=True).returncode == 0
 
-        # ── Check tkinter is bundled with this Python ──────────────────────
-        if py_ok:
-            tk_check = subprocess.run(
-                [PYTHON_EXE, "-c", "import tkinter; tkinter.Tk().destroy()"],
-                capture_output=True, timeout=10)
-            if tk_check.returncode != 0:
-                self._log("WARNING: tkinter/Tcl-Tk not found in this Python install!")
-                self._log("  -> The app will crash on launch without it.")
-                self._log("  -> Fix: use the full python.org installer and check")
-                self._log("     'tcl/tk and IDLE' during setup.")
-                self._log("  -> Microsoft Store Python does NOT include Tcl/Tk.")
-                self._ui(lambda: messagebox.showwarning(
-                    "Missing Tcl/Tk",
-                    "Your Python installation is missing Tcl/Tk (required for the GUI).\n\n"
-                    "The app will not open without it.\n\n"
-                    "Fix:\n"
-                    "1. Download Python from https://python.org/downloads\n"
-                    "2. During install, check 'tcl/tk and IDLE'\n"
-                    "3. Run this installer again\n\n"
-                    "Note: Microsoft Store Python does NOT include Tcl/Tk."
-                ))
+
         if not py_ok:
             # Try bare "python" as last resort
             py_ok = subprocess.run(
@@ -381,31 +337,23 @@ class App(tk.Tk):
         # ── Step 2: Desktop shortcut ──────────────────────────────────────
         # Points directly to pythonw.exe — no .vbs, no .cmd, no wscript.exe
         self._step(2, "run", "Creating Desktop shortcut...")
-        # Read the saved path (set a few lines above in Step 1)
-        _cfg2 = os.path.join(APP_DIR, "python_path.txt")
-        if os.path.isfile(_cfg2):
-            python_exe = open(_cfg2).read().strip()
-            if not os.path.isfile(python_exe):
-                python_exe = _find_python()
-        else:
-            python_exe = _find_python()
-        launcher = python_exe  # already prefers pythonw.exe if available
-        main_py = os.path.join(APP_DIR, "src", "main.py")
+        # Shortcut points directly to the bundled exe — no Python needed
+        app_exe = os.path.join(APP_DIR, "ReactionStudio.exe")
         ico     = os.path.join(APP_DIR, "assets", "icon.ico")
-        workdir = os.path.join(APP_DIR, "src")
+        workdir = APP_DIR
         lnk     = os.path.join(DESKTOP, "Reaction Studio.lnk")
 
         _create_shortcut(
             lnk_path    = lnk,
-            target_exe  = launcher,
-            args        = f'"{main_py}"',
+            target_exe  = app_exe,
+            args        = "",
             workdir     = workdir,
             icon_path   = ico,
             description = "Reaction Studio — Local AI Reaction Video Generator",
         )
         self._step(2, "ok", "Desktop shortcut created")
         self._log(f"Shortcut: {lnk}")
-        self._log(f"  → python.exe \"{main_py}\"")
+        self._log(f"  -> {app_exe}")
         self._prog(80, "Shortcut done")
 
         # ── Step 3: Start Menu ────────────────────────────────────────────
@@ -414,8 +362,8 @@ class App(tk.Tk):
         sm_lnk = os.path.join(START_MENU, "Reaction Studio.lnk")
         _create_shortcut(
             lnk_path    = sm_lnk,
-            target_exe  = launcher,
-            args        = f'"{main_py}"',
+            target_exe  = app_exe,
+            args        = "",
             workdir     = workdir,
             icon_path   = ico,
             description = "Reaction Studio — Local AI Reaction Video Generator",
