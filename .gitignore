@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+_rs_payload.py
+*.egg-info/
+.eggs/
+outputs/
+*.mp4
+*.wav
+*.mp3
