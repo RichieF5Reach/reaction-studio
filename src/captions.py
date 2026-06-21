@@ -42,10 +42,15 @@ def transcribe_with_whisper(audio_path: str,
                             model: str = "base") -> List[Tuple[float, float, str]]:
     """
     Run local whisper on voice audio.
-    Tries whisper.cpp CLI first, then openai-whisper Python package.
-    Returns list of (start_sec, end_sec, text).
+    Returns [] safely if audio_path is invalid or whisper is not installed.
     """
-    tmp_dir = Path(tempfile.mkdtemp())
+    # Guard: skip if audio path is empty or file doesn't exist
+    if not audio_path or not os.path.exists(audio_path):
+        return []
+    if os.path.getsize(audio_path) == 0:
+        return []
+
+    tmp_dir  = Path(tempfile.mkdtemp())
     out_base = str(tmp_dir / "out")
 
     # Try whisper.cpp binary
@@ -103,7 +108,7 @@ def _srt_time_to_seconds(ts: str) -> float:
     try:
         h  = int(parts[0])
         m  = int(parts[1])
-        sf = float(parts[2])   # "03.456"
+        sf = float(parts[2])
         return h * 3600 + m * 60 + sf
     except Exception:
         return 0.0
@@ -129,6 +134,8 @@ def captions_from_script(script: str,
         mins, secs, text = m.groups()
         start    = int(mins) * 60 + int(secs)
         words    = text.split()
+        if not words:
+            continue
         duration = max(1.5, len(words) / words_per_second)
         end      = start + duration
         chunk_size = 8
@@ -196,7 +203,7 @@ def burn_captions(video_clip, entries: List[Tuple[float, float, str]],
                   style_name: str = "Bold Yellow"):
     """
     Overlay caption TextClips onto a moviepy 2.x VideoClip.
-    moviepy 2.x API: TextClip(text=, font_size=), with_start/with_duration/with_position.
+    Uses method="label" (Pillow-based) — works without ImageMagick.
     """
     from moviepy import TextClip, CompositeVideoClip
 
@@ -209,27 +216,33 @@ def burn_captions(video_clip, entries: List[Tuple[float, float, str]],
             continue
         end = min(end, video_clip.duration)
         dur = max(end - start, 0.1)
+        if not text.strip():
+            continue
 
-        kwargs = dict(
-            text=text,
-            font_size=style["font_size"],
-            color=style["color"],
-            stroke_color=style["stroke_color"],
-            stroke_width=style["stroke_width"],
-            method="caption",
-            size=(int(W * 0.9), None),
-            text_align="center",
-        )
-        if style.get("bg_color"):
-            kwargs["bg_color"] = style["bg_color"]
+        try:
+            kwargs = dict(
+                text=text,
+                font_size=style["font_size"],
+                color=style["color"],
+                stroke_color=style["stroke_color"],
+                stroke_width=style["stroke_width"],
+                method="label",          # Pillow-based — no ImageMagick needed
+                size=(int(W * 0.9), None),
+                text_align="center",
+            )
+            if style.get("bg_color"):
+                kwargs["bg_color"] = style["bg_color"]
 
-        txt_clip = (
-            TextClip(**kwargs)
-            .with_position(style["position"], relative=True)
-            .with_start(start)
-            .with_duration(dur)
-        )
-        clips.append(txt_clip)
+            txt_clip = (
+                TextClip(**kwargs)
+                .with_position(style["position"], relative=True)
+                .with_start(start)
+                .with_duration(dur)
+            )
+            clips.append(txt_clip)
+        except Exception as e:
+            print(f"[burn_captions] Skipping caption '{text[:30]}': {e}")
+            continue
 
     return CompositeVideoClip(clips)
 

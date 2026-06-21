@@ -33,27 +33,60 @@ if _src_dir not in sys.path:
 #  STEP 1: Find trending video via yt-dlp
 # ─────────────────────────────────────────────
 def find_trending_video(niche: str, max_duration_sec: int = 1200) -> dict:
-    search_query = f"ytsearch5:{niche} viral 2026"
-    cmd = [
-        "yt-dlp", "--dump-json", "--no-download",
-        "--match-filter", f"duration < {max_duration_sec}",
-        search_query,
+    """
+    Try up to 3 different search queries to find a downloadable video.
+    Falls back gracefully — never returns an empty result that kills the pipeline.
+    """
+    year = time.strftime("%Y")
+    queries = [
+        f"ytsearch10:{niche} viral {year}",
+        f"ytsearch10:{niche} trending",
+        f"ytsearch10:{niche} funny moments",
     ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        lines = [l for l in result.stdout.strip().splitlines() if l.startswith("{")]
-        if lines:
-            data = json.loads(lines[0])
-            return {
-                "url":       data.get("webpage_url", ""),
-                "title":     data.get("title", "Unknown"),
-                "duration":  data.get("duration", 0),
-                "thumbnail": data.get("thumbnail", ""),
-                "uploader":  data.get("uploader", ""),
-            }
-    except Exception as e:
-        print(f"[find_trending_video] {e}")
-    return {"url": "", "title": "Not found", "duration": 0, "thumbnail": "", "uploader": ""}
+
+    for search_query in queries:
+        cmd = [
+            "yt-dlp", "--dump-json", "--no-download",
+            "--match-filter", f"duration < {max_duration_sec}",
+            "--no-playlist",
+            search_query,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            lines = [l for l in result.stdout.strip().splitlines() if l.startswith("{")]
+            # Try each result until we find one that looks downloadable
+            for line in lines:
+                try:
+                    data = json.loads(line)
+                    url  = data.get("webpage_url", "")
+                    if not url:
+                        continue
+                    # Skip age-restricted / members-only quickly
+                    age  = data.get("age_limit", 0) or 0
+                    avail = data.get("availability", "public")
+                    if age > 17 or avail not in ("public", "unlisted", None, ""):
+                        continue
+                    return {
+                        "url":       url,
+                        "title":     data.get("title", "Unknown"),
+                        "duration":  data.get("duration", 0),
+                        "thumbnail": data.get("thumbnail", ""),
+                        "uploader":  data.get("uploader", ""),
+                    }
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[find_trending_video] query '{search_query}': {e}")
+
+    # Hard fallback — a public domain / CC video that always works
+    print("[find_trending_video] All queries failed — using fallback video")
+    return {
+        "url":       "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "title":     "Me at the zoo (first YouTube video ever)",
+        "duration":  19,
+        "thumbnail": "",
+        "uploader":  "jawed",
+    }
 
 
 # ─────────────────────────────────────────────
@@ -92,16 +125,24 @@ def generate_script(video_title: str, niche: str,
         r = requests.post("http://localhost:11434/api/generate",
                           json=payload, timeout=300)
         if r.status_code == 200:
-            return r.json().get("response", "")
+            text = r.json().get("response", "").strip()
+            if text:
+                return text
     except Exception as e:
         print(f"[generate_script] Ollama error: {e}")
 
+    # Fallback script — always produces something
     return "\n".join([
         f"[0:00] okay chat we're watching this — {video_title}",
         "[0:30] wait what [CRASHOUT]",
         "[1:00] nah bro said that with his whole chest [PAUSE]",
         "[2:00] I cannot believe this is real",
         "[3:00] WE ARE SO BACK [CRASHOUT]",
+        "[4:00] chat are you seeing this right now",
+        "[5:00] okay I need a moment [PAUSE]",
+        "[6:00] this is genuinely insane",
+        "[7:00] bro really said that [CRASHOUT]",
+        "[8:00] I'm not okay",
     ])
 
 
@@ -109,26 +150,38 @@ def generate_script(video_title: str, niche: str,
 #  STEP 3: Text-to-Speech via Piper
 # ─────────────────────────────────────────────
 def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bool:
+    """
+    Synthesize voice using Piper TTS. Returns True on success.
+    Safe to call even if Piper is not installed — returns False gracefully.
+    """
     lines = [
         l.split("]")[-1].strip()
         for l in script.splitlines()
         if l.strip() and "[CRASHOUT]" not in l and "[PAUSE]" not in l
     ]
+    if not lines:
+        return False
+
     segment_files = []
     tmp_dir = Path(tempfile.mkdtemp())
 
+    # Determine piper binary
+    piper_cmd = voice_model_path if (voice_model_path and
+                                     os.path.isfile(voice_model_path) and
+                                     voice_model_path.endswith(".onnx")) else None
+    model_arg = piper_cmd or "en_US-lessac-medium"
+
     for i, line in enumerate(lines[:60]):
         seg_path = tmp_dir / f"seg_{i:03d}.wav"
-        cmd = [
-            "piper",
-            "--model",       voice_model_path or "en_US-lessac-medium",
-            "--output-file", str(seg_path),
-        ]
+        cmd = ["piper", "--model", model_arg, "--output-file", str(seg_path)]
         try:
-            subprocess.run(cmd, input=line, capture_output=True,
-                           text=True, timeout=30)
-            if seg_path.exists():
+            r = subprocess.run(cmd, input=line, capture_output=True,
+                               text=True, timeout=30)
+            if seg_path.exists() and seg_path.stat().st_size > 0:
                 segment_files.append(str(seg_path))
+        except FileNotFoundError:
+            print("[synthesize_voice] piper not found — skipping TTS")
+            return False
         except Exception as e:
             print(f"[synthesize_voice] segment {i}: {e}")
 
@@ -143,7 +196,10 @@ def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bo
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
              "-i", str(list_file), "-acodec", "pcm_s16le", output_path],
             capture_output=True, timeout=300)
-        return result.returncode == 0
+        success = result.returncode == 0 and os.path.exists(output_path)
+        if not success:
+            print(f"[synthesize_voice] ffmpeg failed: {result.stderr.decode()[:300]}")
+        return success
     except Exception as e:
         print(f"[synthesize_voice] ffmpeg: {e}")
         return False
@@ -153,21 +209,43 @@ def synthesize_voice(script: str, voice_model_path: str, output_path: str) -> bo
 #  STEP 4: Download source video
 # ─────────────────────────────────────────────
 def download_video(url: str, output_dir: str) -> str:
+    """
+    Download video via yt-dlp. Returns path to downloaded file or "" on failure.
+    Tries two format strings to maximise compatibility.
+    """
+    if not url:
+        return ""
+
     output_template = os.path.join(output_dir, "source.%(ext)s")
-    cmd = [
-        "yt-dlp",
-        "--format", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "--merge-output-format", "mp4",
-        "-o", output_template,
-        url,
+
+    # Try best merged mp4 first, fall back to best single-file
+    format_attempts = [
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "best[height<=720]/best",
     ]
-    try:
-        subprocess.run(cmd, timeout=600, check=True)
-        for f in os.listdir(output_dir):
-            if f.startswith("source."):
-                return os.path.join(output_dir, f)
-    except Exception as e:
-        print(f"[download_video] {e}")
+
+    for fmt in format_attempts:
+        cmd = [
+            "yt-dlp",
+            "--format", fmt,
+            "--merge-output-format", "mp4",
+            "--no-playlist",
+            "-o", output_template,
+            url,
+        ]
+        try:
+            result = subprocess.run(cmd, timeout=600, capture_output=True, text=True)
+            if result.returncode == 0:
+                for f in os.listdir(output_dir):
+                    if f.startswith("source.") and not f.endswith(".part"):
+                        full = os.path.join(output_dir, f)
+                        if os.path.getsize(full) > 10_000:   # at least 10KB
+                            return full
+            else:
+                print(f"[download_video] fmt='{fmt}' failed: {result.stderr[:200]}")
+        except Exception as e:
+            print(f"[download_video] {e}")
+
     return ""
 
 
@@ -203,6 +281,10 @@ def compose_video(source_video: str, voice_audio: str,
       - Transforms: image_transform() and transform() (not fl_image / fl)
       - write_videofile: codec=, audio_codec= (same in 2.x, preset still works)
     """
+    if not source_video or not os.path.exists(source_video):
+        print(f"[compose_video] Source video not found: {source_video!r}")
+        return False
+
     try:
         from moviepy import (
             VideoFileClip, AudioFileClip,
@@ -217,12 +299,19 @@ def compose_video(source_video: str, voice_audio: str,
         )
 
         source = VideoFileClip(source_video)
-        voice  = AudioFileClip(voice_audio) if os.path.exists(voice_audio) else None
 
-        # Apply video filter
+        # ── Voice audio ──────────────────────────────────────────────────
+        has_voice = bool(voice_audio) and os.path.exists(voice_audio) and \
+                    os.path.getsize(voice_audio) > 0
+        voice = AudioFileClip(voice_audio) if has_voice else None
+
+        # Preserve original source audio if no voice track
+        original_audio = source.audio if not has_voice else None
+
+        # ── Apply video filter ────────────────────────────────────────────
         source = apply_filter(source, video_filter)
 
-        # Parse crashout timestamps from script
+        # ── Parse crashout timestamps ─────────────────────────────────────
         crashout_times = []
         for line in script.splitlines():
             if "[CRASHOUT]" in line:
@@ -231,7 +320,7 @@ def compose_video(source_video: str, voice_audio: str,
                     t = int(m.group(1)) * 60 + int(m.group(2))
                     crashout_times.append(t)
 
-        # Apply crashout zoom + shake (moviepy 2.x: transform)
+        # ── Crashout zoom + shake ─────────────────────────────────────────
         if crashout:
             for t in crashout_times[:8]:
                 if t < source.duration - 1:
@@ -240,50 +329,63 @@ def compose_video(source_video: str, voice_audio: str,
                     source = apply_shake(source, start=float(t),
                                          duration=0.5, intensity=6)
 
-        # Generate captions
+        # ── Generate captions ─────────────────────────────────────────────
         caption_entries = []
         srt_path = output_path.replace(".mp4", ".srt")
 
         if caption_mode == "Auto":
-            if voice_audio and os.path.exists(voice_audio):
+            if has_voice:
                 caption_entries = transcribe_with_whisper(voice_audio)
             if not caption_entries:
                 caption_entries = captions_from_script(script)
         elif caption_mode == "Script":
             caption_entries = captions_from_script(script)
+        # caption_mode == "None" -> leave caption_entries empty
 
-        # Burn captions (moviepy 2.x: with_start/with_duration/with_position)
+        # ── Burn captions (safe — falls back if ImageMagick missing) ──────
         if caption_entries:
             export_srt(caption_entries, srt_path)
-            source = burn_captions(source, caption_entries, caption_style)
+            try:
+                source = burn_captions(source, caption_entries, caption_style)
+            except Exception as cap_err:
+                print(f"[compose_video] Caption rendering failed (continuing without): {cap_err}")
 
-        # Crashout text pop-ups
+        # ── Crashout text pop-ups (safe) ───────────────────────────────────
         extra_clips = [source]
         if crashout:
             for t in crashout_times[:5]:
                 if t < source.duration - 3:
-                    # moviepy 2.x TextClip API
-                    txt = (
-                        TextClip(
-                            text=random.choice(CRASHOUT_LINES_SHORT),
-                            font_size=52,
-                            color="yellow",
-                            stroke_color="black",
-                            stroke_width=4,
-                            method="caption",
-                            size=(int(source.w * 0.8), None),
-                            text_align="center",
+                    try:
+                        txt = (
+                            TextClip(
+                                text=random.choice(CRASHOUT_LINES_SHORT),
+                                font_size=52,
+                                color="yellow",
+                                stroke_color="black",
+                                stroke_width=4,
+                                method="label",        # "label" works without ImageMagick
+                                size=(int(source.w * 0.8), None),
+                                text_align="center",
+                            )
+                            .with_position(("center", 0.12), relative=True)
+                            .with_start(float(t))
+                            .with_duration(1.8)
                         )
-                        .with_position(("center", 0.12), relative=True)
-                        .with_start(float(t))
-                        .with_duration(1.8)
-                    )
-                    extra_clips.append(txt)
+                        extra_clips.append(txt)
+                    except Exception as txt_err:
+                        print(f"[compose_video] Crashout text failed (skipping): {txt_err}")
 
+        # ── Compose ───────────────────────────────────────────────────────
         final = CompositeVideoClip(extra_clips)
-        if voice:
-            final = final.with_audio(voice)    # moviepy 2.x: with_audio not set_audio
 
+        # Attach audio: prefer reaction voice, fall back to original source audio
+        if voice is not None:
+            final = final.with_audio(voice)
+        elif original_audio is not None:
+            final = final.with_audio(original_audio)
+
+        # ── Write output ──────────────────────────────────────────────────
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         final.write_videofile(
             output_path,
             fps=30,
@@ -293,7 +395,12 @@ def compose_video(source_video: str, voice_audio: str,
             threads=4,
             logger=None,
         )
-        return True
+        final.close()
+        source.close()
+        if voice:
+            voice.close()
+
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 10_000
 
     except ImportError as e:
         print(f"[compose_video] Missing dependency: {e}")
