@@ -240,20 +240,37 @@ class App(tk.Tk):
     # ── install ───────────────────────────────────────────────────────────────
     def _start(self):
         if self._done:
-            # Launch the app: pythonw.exe src\main.py (no console window, AV-clean)
-            python_exe = _find_python()
-            main_py    = os.path.join(APP_DIR, "src", "main.py")
+            main_py = os.path.join(APP_DIR, "src", "main.py")
+
+            # Read the python path we saved during install — most reliable source
+            _cfg = os.path.join(APP_DIR, "python_path.txt")
+            python_exe = None
+            if os.path.isfile(_cfg):
+                try:
+                    python_exe = open(_cfg).read().strip()
+                    if not os.path.isfile(python_exe):
+                        python_exe = None  # stale path — fall through
+                except Exception:
+                    python_exe = None
+
+            # Fallback: search PATH
+            if not python_exe:
+                import shutil as _sh2
+                python_exe = _sh2.which("pythonw") or _sh2.which("python") or "python"
+
             try:
-                pythonw_path = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
-                launcher = pythonw_path if os.path.isfile(pythonw_path) else python_exe
                 subprocess.Popen(
-                    [launcher, main_py],
+                    [python_exe, main_py],
                     cwd=os.path.join(APP_DIR, "src"),
                     creationflags=0x08000000,  # CREATE_NO_WINDOW
                 )
             except Exception:
-                subprocess.Popen([python_exe, main_py],
-                                 cwd=os.path.join(APP_DIR, "src"))
+                # Last resort: shell=True lets Windows find python on its own
+                subprocess.Popen(
+                    f'start "" "{python_exe}" "{main_py}"',
+                    shell=True,
+                    cwd=os.path.join(APP_DIR, "src"),
+                )
             self.destroy()
             return
 
@@ -291,12 +308,37 @@ class App(tk.Tk):
 
         # ── Step 1: Python packages ───────────────────────────────────────
         self._step(1, "run", "Installing Python packages (1–3 min)...")
+        # Resolve the real python.exe path — works even inside a PyInstaller bundle
+        # because we ask the OS where "python" lives, not sys.executable.
+        import shutil as _sh
+        _py_on_path = _sh.which("python") or _sh.which("python3") or "python"
+        # Prefer pythonw.exe (no console) if it exists next to python.exe
+        _pyw_candidate = os.path.join(os.path.dirname(_py_on_path), "pythonw.exe")
+        PYTHON_EXE = _pyw_candidate if os.path.isfile(_pyw_candidate) else _py_on_path
+
         py_ok = subprocess.run(
-            ["python", "--version"], capture_output=True).returncode == 0
+            [PYTHON_EXE, "--version"], capture_output=True).returncode == 0
+        if not py_ok:
+            # Try bare "python" as last resort
+            py_ok = subprocess.run(
+                ["python", "--version"], capture_output=True).returncode == 0
+            if py_ok:
+                PYTHON_EXE = "python"
         if not py_ok:
             self._step(1, "warn", "Python not found — get it from python.org then rerun")
             self._log("WARNING: Download Python 3.10+ from https://python.org/downloads")
+            PYTHON_EXE = "python"
         else:
+            # ── Save the resolved path so Launch Now can read it reliably ──
+            _cfg = os.path.join(APP_DIR, "python_path.txt")
+            try:
+                os.makedirs(APP_DIR, exist_ok=True)
+                with open(_cfg, "w") as _f:
+                    _f.write(PYTHON_EXE)
+                self._log(f"Python path saved: {PYTHON_EXE}")
+            except Exception as _e:
+                self._log(f"Warning: could not save python path: {_e}")
+
             pkgs = [
                 "yt-dlp", "moviepy", "piper-tts", "openai-whisper",
                 "google-auth", "google-auth-oauthlib",
@@ -308,7 +350,7 @@ class App(tk.Tk):
                 self._log(f"  pip install {pkg}")
                 _timeout = 600 if pkg in _big else 180
                 r = subprocess.run(
-                    ["python", "-m", "pip", "install", pkg, "-q"],
+                    [PYTHON_EXE, "-m", "pip", "install", pkg, "-q"],
                     capture_output=True, timeout=_timeout)
                 self._log(f"  {'ok' if r.returncode == 0 else '!'} {pkg}")
             self._step(1, "ok", "Python packages installed")
@@ -317,10 +359,15 @@ class App(tk.Tk):
         # ── Step 2: Desktop shortcut ──────────────────────────────────────
         # Points directly to pythonw.exe — no .vbs, no .cmd, no wscript.exe
         self._step(2, "run", "Creating Desktop shortcut...")
-        python_exe = _find_python()
-        # Use pythonw.exe if available (no console), else python.exe
-        _pyw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
-        launcher   = _pyw if os.path.isfile(_pyw) else python_exe
+        # Read the saved path (set a few lines above in Step 1)
+        _cfg2 = os.path.join(APP_DIR, "python_path.txt")
+        if os.path.isfile(_cfg2):
+            python_exe = open(_cfg2).read().strip()
+            if not os.path.isfile(python_exe):
+                python_exe = _find_python()
+        else:
+            python_exe = _find_python()
+        launcher = python_exe  # already prefers pythonw.exe if available
         main_py = os.path.join(APP_DIR, "src", "main.py")
         ico     = os.path.join(APP_DIR, "assets", "icon.ico")
         workdir = os.path.join(APP_DIR, "src")
