@@ -34,37 +34,79 @@ DIM    = "#888888"
 
 def _find_python() -> str:
     """
-    Locate the best Python executable to launch the app with.
-    Prefers the same Python that ran the installer (guaranteed to exist).
-    Falls back to python.exe on PATH, then common install locations.
-    Note: we use python.exe + CREATE_NO_WINDOW instead of pythonw.exe
-    because pythonw.exe is not always present (e.g. Microsoft Store Python).
+    Locate a real python.exe to launch the app with.
+    
+    IMPORTANT: When running as a PyInstaller .exe, sys.executable points to
+    the installer .exe itself — NOT python.exe. We must never return that.
+    We detect the PyInstaller bundle via sys.frozen and skip sys.executable.
     """
-    # 1. The exact python.exe that ran this installer — always exists
-    if sys.executable and os.path.isfile(sys.executable):
-        return sys.executable
+    import shutil
 
-    # 2. python.exe next to the running executable
-    py_dir = os.path.dirname(sys.executable or "")
-    if py_dir:
-        candidate = os.path.join(py_dir, "python.exe")
-        if os.path.isfile(candidate):
-            return candidate
+    candidates = []
+
+    # 1. If NOT frozen (running as plain .py script), sys.executable is real python
+    if not getattr(sys, "frozen", False):
+        if sys.executable and os.path.isfile(sys.executable):
+            exe = sys.executable
+            if not exe.lower().endswith((".exe",)) or "python" in exe.lower():
+                candidates.append(exe)
+
+    # 2. Registry — where Windows records the Python install
+    try:
+        import winreg
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            for sub in (
+                r"SOFTWARE\Python\PythonCore",
+                r"SOFTWARE\WOW6432Node\Python\PythonCore",
+            ):
+                try:
+                    with winreg.OpenKey(root, sub) as base_key:
+                        i = 0
+                        while True:
+                            try:
+                                ver = winreg.EnumKey(base_key, i)
+                                with winreg.OpenKey(base_key, ver + r"\InstallPath") as ip:
+                                    path = winreg.QueryValue(ip, None)
+                                    for exe_name in ("pythonw.exe", "python.exe"):
+                                        full = os.path.join(path, exe_name)
+                                        if os.path.isfile(full):
+                                            candidates.append(full)
+                                i += 1
+                            except OSError:
+                                break
+                except OSError:
+                    pass
+    except Exception:
+        pass
 
     # 3. PATH
-    import shutil
-    found = shutil.which("python")
-    if found:
-        return found
+    for name in ("pythonw", "python", "python3"):
+        found = shutil.which(name)
+        if found and os.path.isfile(found):
+            candidates.append(found)
 
-    # 4. Common Windows install locations
-    for base in [r"C:\Python312", r"C:\Python311", r"C:\Python310",
-                 r"C:\Python39",  r"C:\Python38"]:
-        candidate = os.path.join(base, "python.exe")
-        if os.path.isfile(candidate):
-            return candidate
+    # 4. Common install locations
+    import glob
+    for pattern in [
+        r"C:\Users\*\AppData\Local\Programs\Python\Python3*\pythonw.exe",
+        r"C:\Users\*\AppData\Local\Programs\Python\Python3*\python.exe",
+        r"C:\Python3*\pythonw.exe",
+        r"C:\Python3*\python.exe",
+        r"C:\Program Files\Python3*\pythonw.exe",
+        r"C:\Program Files\Python3*\python.exe",
+    ]:
+        candidates.extend(glob.glob(pattern))
 
-    return "python"   # last resort
+    # Filter: must be a real file and must NOT be this installer exe
+    this_exe = os.path.abspath(sys.executable).lower()
+    for c in candidates:
+        c_abs = os.path.abspath(c).lower()
+        if c_abs == this_exe:
+            continue  # skip — this is the installer itself
+        if os.path.isfile(c):
+            return c   # return first valid hit
+
+    return "python"   # absolute last resort — rely on PATH
 
 
 def _create_shortcut(lnk_path: str, target_exe: str, args: str,
