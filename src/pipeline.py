@@ -14,7 +14,6 @@ import sys
 import tempfile
 import textwrap
 import time
-import requests
 from pathlib import Path
 
 CONFIG_DIR  = Path.home() / ".reaction_studio"
@@ -96,6 +95,7 @@ def find_trending_video(niche: str, max_duration_sec: int = 1200) -> dict:
 # ─────────────────────────────────────────────
 def generate_script(video_title: str, niche: str,
                     energy: str, style_hint: str) -> str:
+    import requests  # lazy — not installed until Setup runs
     energy_desc = {
         "Chill":    "relaxed, observational, occasional dry humor",
         "Mid":      "conversational, moderate energy, relatable commentary",
